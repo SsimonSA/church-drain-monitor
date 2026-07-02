@@ -63,7 +63,7 @@ const char* DEVICE_TAG = "drain-1";
 //
 // >>> BUMP FW_VERSION ON EVERY RELEASE. The manifest's version must EXCEED this to
 //     trigger an update; equal or lower is a no-op, which is what stops reflash loops.
-const int FW_VERSION = 1;
+const int FW_VERSION = 2;
 const char* OTA_MANIFEST_URL =
     "https://raw.githubusercontent.com/SsimonSA/church-drain-monitor/main/firmware/ota/manifest.txt";
 const unsigned long OTA_CHECK_INTERVAL_MS = 6UL * 3600UL * 1000UL;  // re-check every 6 h
