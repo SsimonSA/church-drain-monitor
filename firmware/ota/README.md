@@ -61,9 +61,18 @@ usually means cutting a new release with a *higher* number containing the old co
   checksum) before switching the boot partition, so a corrupt/truncated *download*
   can't brick the device — the current firmware keeps running. It does **not** auto-
   revert a firmware that flashes cleanly but then crashes at runtime; the Arduino-ESP32
-  bootloader isn't built with app-rollback enabled. Your safety net there is the
-  Grafana `fw`/liveness signal — if a unit goes silent after an update, it needs a USB
-  reflash. Test each build on the bench before cutting a release.
+  bootloader isn't built with app-rollback enabled. Test each build on the bench before
+  cutting a release.
+- **Local post-update self-check (network-independent).** The firmware classifies each
+  boot from `esp_reset_reason()` and an NVS crash counter, and logs it over serial:
+  `first boot of fw vN`, `clean boot OK`, `CRASH (PANIC/WDT) bad-boot k/3 X`, or a loud
+  `SUSPECT BUILD` after 3 firmware crashes. Because it's local, it flags a bad build
+  even at a site with no WiFi — you don't have to infer health from dashboard silence.
+  **Brownouts are called out separately** as a power fault and never count toward the
+  suspect threshold (a flaky supply must not masquerade as a bad binary). The last reset
+  reason is also sent as the `rst` telemetry field so Grafana can annotate reboots.
+  This surfaces a bad build; it still can't *auto-revert* one (that needs the rollback
+  bootloader) — a confirmed-bad unit needs a USB reflash.
 - **TLS is encrypt-only** (`setInsecure()`), matching the telemetry path. Fine for a
   public binary; if you later want MITM protection, pin GitHub's root CA or add a
   SHA-256 check to the manifest.

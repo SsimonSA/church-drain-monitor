@@ -38,6 +38,8 @@
 #include <WiFiClientSecure.h>
 #include <HTTPClient.h>
 #include <HTTPUpdate.h>   // pull-based OTA (device fetches a manifest, self-flashes from a GitHub release)
+#include <Preferences.h>  // NVS-backed boot/version state for the post-update self-check
+#include <esp_system.h>   // esp_reset_reason()
 #include <time.h>
 
 #include "secrets.h"   // WIFI_NETS[], N_WIFI, INFLUX_TOKEN — gitignored; see secrets.example.h
@@ -67,6 +69,10 @@ const char* OTA_MANIFEST_URL =
 const unsigned long OTA_CHECK_INTERVAL_MS = 6UL * 3600UL * 1000UL;  // re-check every 6 h
 const unsigned long OTA_FIRST_CHECK_MS    = 60000UL;               // first check ~1 min after boot
                                                                    // (long enough to send startup telemetry first)
+
+// Post-update self-check: prove a new binary is healthy LOCALLY (no network needed).
+const unsigned long VALIDATE_STABLE_MS = 60000UL;  // run this long without a crash -> mark the firmware good
+const int OTA_BAD_BOOT_LIMIT = 3;                  // this many firmware-CRASH reboots since an update -> loud SUSPECT warning
 
 // ====== SENSOR (HC-SR04) ======
 const int   TRIG_PIN = 22;   // reused from old VL53 I2C (SCL); direct 3.3V drive OK
@@ -161,6 +167,14 @@ unsigned long lastSampleMs = 0;
 unsigned long lastEnqueueMs = 0;
 unsigned long lastSendOkMs = 0;
 unsigned long lastOtaCheckMs = 0;
+
+// ---- post-update self-check state ----
+Preferences otaPrefs;
+esp_reset_reason_t g_resetReason = ESP_RST_UNKNOWN;
+bool     g_pendingValidation = false;   // running an as-yet-unproven firmware
+uint32_t g_bootCount = 0;
+uint32_t g_badBoots  = 0;               // consecutive firmware-crash reboots since last good boot
+unsigned long g_bootMs = 0;
 bool isBelow = false;
 unsigned long belowSinceMs = 0;
 
@@ -344,7 +358,8 @@ bool flushBuffer() {
     body += ",pings_outwin="; body += rbuf[i].outWin; body += "i";
     body += ",pings_noecho="; body += rbuf[i].noEcho; body += "i";
     body += ",rssi=";         body += rbuf[i].rssi;   body += "i";
-    body += ",fw=";           body += FW_VERSION;     body += "i ";  // running firmware version -> Grafana can show which units updated
+    body += ",fw=";           body += FW_VERSION;         body += "i";   // running firmware version -> Grafana shows which units updated
+    body += ",rst=";          body += (int)g_resetReason; body += "i ";  // last reset reason -> annotate reboots (brownout vs crash vs OTA)
     body += rbuf[i].t;        body += "\n";
   }
   WiFiClientSecure client;
@@ -464,6 +479,79 @@ void checkForOTA() {
   }
 }
 
+// ---------- post-update self-check (network-independent) ----------
+// Whether a new binary is "good" is decided LOCALLY, not by whether it reaches Grafana:
+// a healthy build at a flaky-WiFi site would be silent on the dashboard, so cloud reach
+// is a bad proxy. Instead we watch esp_reset_reason() + an NVS crash counter (NVS survives
+// power loss, unlike RTC memory). A build that PANICs / watchdog-loops after an update is
+// flagged here with no network involved. BROWNOUT is called out separately — it's a POWER
+// fault, not a bad build, so it never counts toward the suspect threshold.
+const char* resetReasonStr(esp_reset_reason_t r) {
+  switch (r) {
+    case ESP_RST_POWERON:   return "power-on";
+    case ESP_RST_SW:        return "sw-restart";   // our own OTA reboot / watchdog reboot
+    case ESP_RST_EXT:       return "ext-reset";
+    case ESP_RST_DEEPSLEEP: return "deep-sleep";
+    case ESP_RST_PANIC:     return "PANIC";
+    case ESP_RST_INT_WDT:   return "INT-WDT";
+    case ESP_RST_TASK_WDT:  return "TASK-WDT";
+    case ESP_RST_WDT:       return "WDT";
+    case ESP_RST_BROWNOUT:  return "BROWNOUT";
+    default:                return "unknown";
+  }
+}
+static bool isFirmwareCrash(esp_reset_reason_t r) {
+  return r == ESP_RST_PANIC || r == ESP_RST_INT_WDT || r == ESP_RST_TASK_WDT || r == ESP_RST_WDT;
+}
+
+// Called once, early in setup(): classify how we got here and update the crash counter.
+void initSelfCheck() {
+  g_bootMs      = millis();
+  g_resetReason = esp_reset_reason();
+  otaPrefs.begin("ota", false);                 // NVS namespace
+  uint32_t lastVer = otaPrefs.getUInt("ver", 0);
+  g_bootCount      = otaPrefs.getUInt("boots", 0) + 1;
+  g_badBoots       = otaPrefs.getUInt("bad", 0);
+  otaPrefs.putUInt("boots", g_bootCount);
+
+  bool firstBootAfterUpdate = (lastVer != (uint32_t)FW_VERSION);
+
+  if (firstBootAfterUpdate) {
+    // First time this version has ever run -> record it, start a fresh validation window.
+    otaPrefs.putUInt("ver", (uint32_t)FW_VERSION);
+    g_badBoots = 0; otaPrefs.putUInt("bad", 0);
+    g_pendingValidation = true;
+    Serial.printf("SELFCHECK: first boot of fw v%d (was v%lu), reset=%s\n",
+                  FW_VERSION, (unsigned long)lastVer, resetReasonStr(g_resetReason));
+  } else if (g_resetReason == ESP_RST_BROWNOUT) {
+    // Power fault, not a firmware fault — do NOT count it, do NOT re-open validation.
+    Serial.printf("SELFCHECK: fw v%d BROWNOUT reset — POWER problem, not the build. "
+                  "Check supply / cable / bulk cap.\n", FW_VERSION);
+  } else if (isFirmwareCrash(g_resetReason)) {
+    // Crashed running an already-seen build -> treat as unproven again and count it.
+    g_pendingValidation = true;
+    g_badBoots++; otaPrefs.putUInt("bad", g_badBoots);
+    Serial.printf("SELFCHECK: fw v%d CRASH (%s) — bad-boot %lu/%d  X\n",
+                  FW_VERSION, resetReasonStr(g_resetReason), (unsigned long)g_badBoots, OTA_BAD_BOOT_LIMIT);
+  } else {
+    Serial.printf("SELFCHECK: fw v%d clean boot (%s)  OK\n", FW_VERSION, resetReasonStr(g_resetReason));
+  }
+
+  if (g_badBoots >= (uint32_t)OTA_BAD_BOOT_LIMIT)
+    Serial.printf("SELFCHECK: ** SUSPECT BUILD v%d — %lu firmware crashes since last good boot. "
+                  "Reflash a known-good build over USB. **\n", FW_VERSION, (unsigned long)g_badBoots);
+}
+
+// Called every loop: once the firmware has run VALIDATE_STABLE_MS without crashing, mark it
+// good and clear the crash counter. This is the network-independent "this binary is OK" gate.
+void markValidatedIfStable() {
+  if (!g_pendingValidation) return;
+  if (millis() - g_bootMs < VALIDATE_STABLE_MS) return;
+  g_pendingValidation = false;
+  g_badBoots = 0; otaPrefs.putUInt("bad", 0);
+  Serial.printf("SELFCHECK: fw v%d validated — stable %lus  OK\n", FW_VERSION, VALIDATE_STABLE_MS / 1000UL);
+}
+
 void setup() {
   Serial.begin(115200);
 
@@ -485,6 +573,7 @@ void setup() {
   delay(50);
   Serial.println();
   Serial.println(F("St. Joes Drain Monitor — booting"));
+  initSelfCheck();   // classify how we booted (clean / crash / brownout) before anything else
 
   WiFi.mode(WIFI_STA);
   connectWifiOnce();   // tries SJC guest -> hotspot -> home, in order
@@ -514,6 +603,7 @@ void loop() {
   if (ms - lastSampleMs >= SAMPLE_INTERVAL_MS) {
     lastSampleMs = ms;
     ensureWifi();
+    markValidatedIfStable();   // once we've run stably, mark this firmware good (network-independent)
 
     float lvl = readLevelInches();
     if (!isnan(lvl)) {
