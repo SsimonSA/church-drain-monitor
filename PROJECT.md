@@ -55,7 +55,7 @@ LGLED=18, HGLED=5, LYLED=17, HYLED=16, LRLED=4, overflow LED=2. (The panel-mount
 2. **VL53L1X ToF (TOF400C modules)** — explored FOV, ROI reduction, Long mode, timing budgets,
    smoothing, auto-calibration. Better than ultrasonic but ❌ still untrustworthy: splashes,
    dirty/changing reflectivity, scum accumulation.
-   - *The existing `ChurchWaterDrainMonito.ino` is this abandoned VL53L1X version.*
+   - *`experiments/vl53l1x-abandoned/ChurchWaterDrainMonito.ino` is this abandoned VL53L1X version.*
 3. **Float + Hall sensors** — keeps electronics dry, easy to clean, immune to splashes/optics.
    Designed but **set aside** (see "Alternative / fallback" below) in favor of #4.
 4. **Float + HC-SR04 in a pipe (CURRENT direction)** — return to the HC-SR04, but fix its old

@@ -13,10 +13,10 @@ mechanical build, calibration).
 
 | Path | What it is |
 |------|------------|
-| `experiments/SR04_Characterize/` | **Field firmware** (`StJoesDrainMonitor`) — the deployed build: sensor, LEDs, buzzer, button, InfluxDB telemetry. |
+| `firmware/` | **Field firmware** (`StJoesDrainMonitor`) — the deployed build: sensor, LEDs, buzzer, button, InfluxDB telemetry. |
 | `experiments/BenchTest/` | Interactive bench harness — exercise LEDs / buzzer / sensor / WiFi / InfluxDB write from a serial menu. |
 | `experiments/BtnLedTest/` | Minimal button + LED sanity sketch. |
-| `ChurchWaterDrainMonito.ino` | Abandoned VL53L1X ToF version (kept for reference). |
+| `experiments/vl53l1x-abandoned/` | Abandoned VL53L1X ToF version (kept for reference). |
 
 ## Setup — credentials
 
@@ -24,7 +24,7 @@ Credentials are **not** committed. Each firmware project reads them from a gitig
 `secrets.h`. To build:
 
 ```sh
-cd experiments/SR04_Characterize/src   # (and likewise experiments/BenchTest/src)
+cd firmware/src   # (and likewise experiments/BenchTest/src)
 cp secrets.example.h secrets.h
 # then edit secrets.h with your WiFi network(s) and InfluxDB write token
 ```
