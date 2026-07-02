@@ -34,13 +34,15 @@ manifest that points at a `.bin` that isn't uploaded yet.
    cd ..            # into firmware/
    pio run          # output: .pio/build/esp32dev/firmware.bin
    ```
-3. **Cut a GitHub release** and attach the binary, renamed to match the version:
+3. **Cut a GitHub release** and attach the binary. The asset's download filename is the
+   file's basename and the manifest URL must match it, so **rename the bin before upload**
+   — the `path#label` form only sets a display *label*, NOT the download filename:
    ```sh
+   cp .pio/build/esp32dev/firmware.bin StJoesDrainMonitor-v2.bin
    gh release create fw-v2 \
      --title "Firmware v2" --notes "what changed" \
-     ".pio/build/esp32dev/firmware.bin#StJoesDrainMonitor-v2.bin"
+     StJoesDrainMonitor-v2.bin
    ```
-   (The `#name` suffix sets the asset's download filename.)
 4. **Flip the manifest** — edit `manifest.txt` to:
    ```
    2
