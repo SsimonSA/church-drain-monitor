@@ -1,0 +1,2 @@
+1
+https://github.com/SsimonSA/church-drain-monitor/releases/download/fw-v1/StJoesDrainMonitor-v1.bin

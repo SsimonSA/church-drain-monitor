@@ -37,6 +37,7 @@
 #include <WiFi.h>
 #include <WiFiClientSecure.h>
 #include <HTTPClient.h>
+#include <HTTPUpdate.h>   // pull-based OTA (device fetches a manifest, self-flashes from a GitHub release)
 #include <time.h>
 
 #include "secrets.h"   // WIFI_NETS[], N_WIFI, INFLUX_TOKEN — gitignored; see secrets.example.h
@@ -50,6 +51,22 @@ const char* INFLUX_WRITE_URL =
 // INFLUX_TOKEN is provided by secrets.h (gitignored)
 const char* DEVICE_TAG = "drain-1";
 // TLS: encrypt but skip cert validation (setInsecure); the write token is the gate.
+
+// ====== OTA (pull-based) ======
+// The device periodically fetches a plain-text manifest and, if it advertises a
+// version newer than FW_VERSION, downloads that .bin and self-flashes. There is NO
+// push path — updates are driven entirely by the device. Publishing an update =
+// upload the new .bin as a GitHub release asset, then bump the manifest (see
+// firmware/ota/README.md). Never flashes while the water is high (see loop()).
+//
+// >>> BUMP FW_VERSION ON EVERY RELEASE. The manifest's version must EXCEED this to
+//     trigger an update; equal or lower is a no-op, which is what stops reflash loops.
+const int FW_VERSION = 1;
+const char* OTA_MANIFEST_URL =
+    "https://raw.githubusercontent.com/SsimonSA/church-drain-monitor/main/firmware/ota/manifest.txt";
+const unsigned long OTA_CHECK_INTERVAL_MS = 6UL * 3600UL * 1000UL;  // re-check every 6 h
+const unsigned long OTA_FIRST_CHECK_MS    = 60000UL;               // first check ~1 min after boot
+                                                                   // (long enough to send startup telemetry first)
 
 // ====== SENSOR (HC-SR04) ======
 const int   TRIG_PIN = 22;   // reused from old VL53 I2C (SCL); direct 3.3V drive OK
@@ -143,6 +160,7 @@ int   g_noEcho = 0;     // pings with no echo at all
 unsigned long lastSampleMs = 0;
 unsigned long lastEnqueueMs = 0;
 unsigned long lastSendOkMs = 0;
+unsigned long lastOtaCheckMs = 0;
 bool isBelow = false;
 unsigned long belowSinceMs = 0;
 
@@ -325,7 +343,8 @@ bool flushBuffer() {
     body += ",pings_kept=";   body += rbuf[i].kept;   body += "i";
     body += ",pings_outwin="; body += rbuf[i].outWin; body += "i";
     body += ",pings_noecho="; body += rbuf[i].noEcho; body += "i";
-    body += ",rssi=";         body += rbuf[i].rssi;   body += "i ";
+    body += ",rssi=";         body += rbuf[i].rssi;   body += "i";
+    body += ",fw=";           body += FW_VERSION;     body += "i ";  // running firmware version -> Grafana can show which units updated
     body += rbuf[i].t;        body += "\n";
   }
   WiFiClientSecure client;
@@ -389,6 +408,62 @@ void ensureWifi() {
   }
 }
 
+// ---------- OTA (pull) ----------
+// Fetch the manifest; if it advertises a version > FW_VERSION, download that .bin and
+// flash it. On success httpUpdate reboots into the new image and this call never returns.
+// Blocks for the duration of the download (a few seconds) — the local alarm is frozen
+// while it runs, so the caller MUST only invoke this when the water is low (see loop()).
+//
+// Manifest format (plain text, exactly two lines):
+//   <version integer>
+//   <https URL of the .bin>
+void checkForOTA() {
+  // 1) Fetch the manifest.
+  WiFiClientSecure mclient;
+  mclient.setInsecure();               // encrypt-only, matching the InfluxDB path
+  HTTPClient http;
+  http.setTimeout(8000);
+  http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);   // raw.githubusercontent may 30x
+  if (!http.begin(mclient, OTA_MANIFEST_URL)) { Serial.println("OTA: manifest begin failed"); return; }
+  int code = http.GET();
+  if (code != HTTP_CODE_OK) { Serial.printf("OTA: manifest HTTP %d\n", code); http.end(); return; }
+  String body = http.getString();
+  http.end();
+
+  // 2) Parse version (line 1) and bin URL (line 2).
+  int nl = body.indexOf('\n');
+  if (nl < 0) { Serial.println("OTA: manifest malformed (need 2 lines)"); return; }
+  int  version = body.substring(0, nl).toInt();
+  String url   = body.substring(nl + 1);
+  url.trim();                          // strip trailing CR / whitespace
+
+  Serial.printf("OTA: running v%d, manifest v%d\n", FW_VERSION, version);
+  if (version <= FW_VERSION || url.length() == 0) { Serial.println("OTA: up to date"); return; }
+
+  // 3) Newer version available -> download + flash.
+  Serial.printf("OTA: updating -> %s\n", url.c_str());
+  digitalWrite(PIN_BUZZER, LOW);       // guarantee silence across the blocking flash
+
+  WiFiClientSecure uclient;
+  uclient.setInsecure();
+  httpUpdate.setFollowRedirects(HTTPC_FORCE_FOLLOW_REDIRECTS);  // GitHub redirects release assets to a CDN host
+  httpUpdate.rebootOnUpdate(true);                             // boot the new image on success
+  t_httpUpdate_return ret = httpUpdate.update(uclient, url);   // reboots here on success; below only runs on no-op/fail
+  switch (ret) {
+    case HTTP_UPDATE_NO_UPDATES:
+      Serial.println("OTA: server reported no update");
+      break;
+    case HTTP_UPDATE_FAILED:
+      // Image is verified before the boot partition is switched, so a bad/truncated
+      // download leaves the CURRENT firmware running — we just log and carry on.
+      Serial.printf("OTA: FAILED (%d) %s\n",
+                    httpUpdate.getLastError(), httpUpdate.getLastErrorString().c_str());
+      break;
+    default:
+      break;
+  }
+}
+
 void setup() {
   Serial.begin(115200);
 
@@ -427,6 +502,9 @@ void setup() {
   lastSampleMs = now;
   lastEnqueueMs = now - SLOW_INTERVAL_MS;
   lastSendOkMs = now;
+  // First OTA check fires ~OTA_FIRST_CHECK_MS after boot (device sends startup telemetry first),
+  // then every OTA_CHECK_INTERVAL_MS.
+  lastOtaCheckMs = now - OTA_CHECK_INTERVAL_MS + OTA_FIRST_CHECK_MS;
 }
 
 void loop() {
@@ -480,6 +558,17 @@ void loop() {
                   (int)beepOn, (int)muted, (int)acked);
 
     if (WiFi.status() == WL_CONNECTED && rcount > 0) { if (flushBuffer()) lastSendOkMs = ms; }
+
+    // ----- OTA check: infrequent, ONLY when online AND the water is low (never mid-warn/alarm) -----
+    // Gating on lastLevelIn < WARN_IN means a reboot-for-update can't take the alarm offline
+    // during an actual backup. checkForOTA() blocks a few seconds and reboots on success.
+    if (WiFi.status() == WL_CONNECTED &&
+        lastLevelIn < WARN_IN &&
+        ms - lastOtaCheckMs >= OTA_CHECK_INTERVAL_MS) {
+      lastOtaCheckMs = ms;
+      checkForOTA();
+    }
+
     if (millis() - lastSendOkMs > WATCHDOG_MS) { Serial.println("Watchdog reboot"); delay(200); ESP.restart(); }
   }
 

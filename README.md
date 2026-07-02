@@ -32,6 +32,14 @@ cp secrets.example.h secrets.h
 `secrets.h` provides `WIFI_NETS[]`, `N_WIFI`, and `INFLUX_TOKEN`. Use a **write-only,
 bucket-scoped** InfluxDB token — that token is embedded in the compiled binary.
 
+## Over-the-air updates
+
+The field firmware self-updates over the internet — the device polls a manifest and
+flashes a newer binary from a GitHub release when the water is low. There is no push
+from the IDE. Full process and the publish/rollback steps are in
+[firmware/ota/README.md](firmware/ota/README.md); the live manifest is
+[firmware/ota/manifest.txt](firmware/ota/manifest.txt).
+
 ## Toolchain
 
 PlatformIO (`espressif32` / `esp32dev`). Open a project folder and `pio run -t upload`.
