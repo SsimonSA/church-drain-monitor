@@ -1,0 +1,131 @@
+/*
+ * SR04_Characterize  —  Drain Overflow Monitor bench test
+ * ---------------------------------------------------------
+ * Purpose: validate the "float in a 2" PVC pipe + HC-SR04 looking down the bore" idea.
+ * Push the pencil-mounted float to a known mark (read off the tape measure at the open end)
+ * and compare it to the distance this sketch reports. Logs accuracy, linearity, repeatability.
+ *
+ * Reads raw with pulseIn() (no library) so we control timing and filtering.
+ * Each report is the MEDIAN of a burst of pings (robust against spurious echoes) plus the
+ * min/max spread so you can judge noise at each float position.
+ *
+ * ====== SET THESE TO MATCH YOUR BREADBOARD WIRING ======
+ */
+const int TRIG_PIN = 26;   // HC-SR04 Trig  -> change to your wiring
+const int ECHO_PIN = 25;   // HC-SR04 Echo  -> change to your wiring
+/*
+ * NOTE: the HC-SR04 is a 5 V module. Power it from 5V (VIN/5V pin), not 3V3.
+ * Its Echo output idles at 5 V — feeding that straight into a 3.3 V ESP32 pin is out of spec.
+ * Most boards survive it, but the clean fix is a divider on Echo (e.g. 1k from Echo to the pin,
+ * 2k from pin to GND). If readings are flaky or the board misbehaves, add the divider first.
+ * =======================================================
+ */
+
+const int   SAMPLES        = 21;      // pings per report (odd -> clean median)
+const unsigned long ECHO_TIMEOUT_US = 30000UL;  // ~5 m max; our range is < 1 ft
+const unsigned long REPORT_PERIOD_MS = 750;     // how often to print
+
+// Speed of sound ~ 343 m/s at 20 C => 0.0343 cm/us, round trip => divide by 2.
+// Equivalent to the classic "microseconds / 58.0 = cm". Adjust if you want temp compensation.
+const float US_PER_CM = 58.0f;
+
+// ====== TUBE GEOMETRY (for converting raw distance -> water level) ======
+// Sensor looks DOWN the bore. We measure distance to the TOP of the float.
+// The float rides on the water, so the water surface is at the float's BOTTOM.
+//   water level (above open end) = TUBE_LEN - (rawDistance + FLOAT_LEN)
+// As water rises, the float rises, the raw distance shrinks, the level grows.
+const float TUBE_LEN_CM  = 30.7f;  // sensor face to the open (bottom) end of the tube
+const float FLOAT_LEN_CM = 4.0f;   // float length; water surface = measured top + this.
+                                   // Set to 0 if you'd rather reference the float's TOP.
+const float CM_PER_IN    = 2.54f;
+
+// ====== TWO-POINT CALIBRATION (raw geometry -> true level) ======
+// The geometry above yields a *raw* level, but the sensor's distance scale and any
+// fixed reference offset aren't perfect (bench test showed ~11% span error, i.e. a
+// wrong slope, not just an offset). A straight line through two known points fixes
+// both the zero and the slope at once.
+//
+// To (re)calibrate:
+//   1) Set SHOW_RAW = true, reflash, open the Serial Monitor.
+//   2) Park the float at a LOW mark and a HIGH mark; note the printed "raw" inches.
+//   3) Enter each (raw, true) pair below, set SHOW_RAW = false, reflash.
+const bool  SHOW_RAW    = false;   // true -> also print the uncalibrated raw level
+const float CAL_RAW_LO  = 0.43f;   // raw level shown at the LOW mark  (in)
+const float CAL_TRUE_LO = 0.00f;   // actual level at the LOW mark     (in) -- float bottomed
+const float CAL_RAW_HI  = 4.909f;  // raw level shown at the HIGH mark (in)
+const float CAL_TRUE_HI = 5.00f;   // actual level at the HIGH mark    (in)
+
+// One ping. Returns distance in cm, or -1.0 on timeout / no echo.
+float pingOnce() {
+  digitalWrite(TRIG_PIN, LOW);
+  delayMicroseconds(3);
+  digitalWrite(TRIG_PIN, HIGH);
+  delayMicroseconds(10);
+  digitalWrite(TRIG_PIN, LOW);
+
+  unsigned long us = pulseIn(ECHO_PIN, HIGH, ECHO_TIMEOUT_US);
+  if (us == 0) return -1.0f;          // timeout: no echo within window
+  return us / US_PER_CM;
+}
+
+// Insertion sort a small float array ascending.
+void sortAsc(float *a, int n) {
+  for (int i = 1; i < n; i++) {
+    float key = a[i];
+    int j = i - 1;
+    while (j >= 0 && a[j] > key) { a[j + 1] = a[j]; j--; }
+    a[j + 1] = key;
+  }
+}
+
+void setup() {
+  Serial.begin(115200);
+  pinMode(TRIG_PIN, OUTPUT);
+  pinMode(ECHO_PIN, INPUT);
+  digitalWrite(TRIG_PIN, LOW);
+  delay(50);
+
+  Serial.println();
+  Serial.println(F("SR04 water-level monitor — float-in-pipe"));
+  Serial.print  (F("TRIG=")); Serial.print(TRIG_PIN);
+  Serial.print  (F("  ECHO=")); Serial.println(ECHO_PIN);
+  Serial.print  (F("tube=")); Serial.print(TUBE_LEN_CM, 1);
+  Serial.print  (F(" cm  float=")); Serial.print(FLOAT_LEN_CM, 1);
+  Serial.println(F(" cm"));
+  Serial.println(F("Move the float to emulate the water level. Output = water level in inches."));
+  Serial.println();
+}
+
+void loop() {
+  static float buf[SAMPLES];
+  int valid = 0;
+
+  for (int i = 0; i < SAMPLES; i++) {
+    float d = pingOnce();
+    if (d > 0) buf[valid++] = d;
+    delay(20);   // > the SR04's ~60 ms cycle is overkill; 20 ms avoids self-echo overlap
+  }
+
+  if (valid == 0) {
+    Serial.println(F("-- no echo (float out of range, or check wiring/divider) --"));
+    delay(REPORT_PERIOD_MS);
+    return;
+  }
+
+  sortAsc(buf, valid);
+  float median = buf[valid / 2];   // raw distance from sensor to top of float, cm
+
+  // Raw level from tube geometry: water surface height above the open end, in inches.
+  float rawIn = (TUBE_LEN_CM - (median + FLOAT_LEN_CM)) / CM_PER_IN;
+
+  // Two-point linear correction (fixes both zero and slope) -> true level.
+  float slope   = (CAL_TRUE_HI - CAL_TRUE_LO) / (CAL_RAW_HI - CAL_RAW_LO);
+  float levelIn = CAL_TRUE_LO + (rawIn - CAL_RAW_LO) * slope;
+  if (levelIn < 0.0f) levelIn = 0.0f;   // clamp: float at/below the bottom = empty
+
+  if (SHOW_RAW) { Serial.print(F("raw ")); Serial.print(rawIn, 2); Serial.print(F(" in  ->  ")); }
+  Serial.print(levelIn, 2);
+  Serial.println(F(" in"));
+
+  delay(REPORT_PERIOD_MS);
+}

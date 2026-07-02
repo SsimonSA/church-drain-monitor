@@ -1,0 +1,203 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Drain Monitor — perfboard layout + power (USB + MT3608 boost)</title>
+<style>
+  body { background:#1e1e1e; color:#ddd; font-family:Segoe UI, Arial, sans-serif; margin:24px; }
+  h1 { font-size:20px; } h2 { font-size:15px; color:#9cf; margin-top:22px; }
+  .wrap { display:flex; gap:32px; flex-wrap:wrap; align-items:flex-start; }
+  table { border-collapse:collapse; font-size:13px; margin-bottom:8px; }
+  td,th { border:1px solid #444; padding:4px 8px; text-align:left; vertical-align:top; }
+  th { background:#333; }
+  code { color:#ffd479; }
+  .note { max-width:460px; font-size:13px; line-height:1.5; }
+  .warn { max-width:600px; font-size:13px; line-height:1.5; background:#3a2410; border:1px solid #a5742a; padding:10px 14px; border-radius:6px; }
+  pre { background:#111; border:1px solid #444; padding:12px; font-size:12px; color:#cde; overflow:auto; }
+  .have { color:#9be29b; } .buy { color:#ffc27a; }
+</style>
+</head>
+<body>
+<h1>St. Joes Drain Monitor — perfboard layout + power</h1>
+<p class="note"><b>Power:</b> 5 V USB wall-wart powers the ESP32; an <b>MT3608 boost (set to 12 V)</b> off the
+board's 5 V pin makes the 12 V rail for the buzzer + ring LED. <b>Switches:</b> logic-level N-MOSFET
+(2N7000 or RFP30N06LE) — gate from the GPIO, 100 kΩ gate pull-down, no base resistor. Firmware active-HIGH, unchanged.</p>
+
+<div class="wrap">
+<svg width="600" height="780" viewBox="0 0 600 780" xmlns="http://www.w3.org/2000/svg">
+  <rect x="8" y="8" width="584" height="764" rx="18" fill="#7a2d1f" stroke="#c0392b" stroke-width="6"/>
+  <rect x="34" y="34" width="532" height="712" rx="6" fill="#9c6b3f" opacity="0.55"/>
+  <circle cx="40" cy="40" r="9" fill="#1e1e1e"/><circle cx="560" cy="40" r="9" fill="#1e1e1e"/>
+  <circle cx="40" cy="740" r="9" fill="#1e1e1e"/><circle cx="560" cy="740" r="9" fill="#1e1e1e"/>
+
+  <rect x="50" y="64" width="120" height="58" rx="5" fill="#2c3e50" stroke="#5dade2" stroke-width="2"/>
+  <text x="110" y="86" fill="#9fd0ff" font-size="12" text-anchor="middle">4-pin JST</text>
+  <text x="110" y="103" fill="#9fd0ff" font-size="11" text-anchor="middle">SR04 sensor</text>
+  <text x="110" y="138" fill="#ddd" font-size="9.5" text-anchor="middle">GND·ECHO→21·TRIG→22·VCC→5V</text>
+
+  <rect x="300" y="56" width="200" height="56" rx="5" fill="#2c3e50" stroke="#5dade2" stroke-width="2"/>
+  <text x="400" y="78" fill="#9fd0ff" font-size="12" text-anchor="middle">6-pin JST — LED panel</text>
+  <text x="400" y="95" fill="#9fd0ff" font-size="11" text-anchor="middle">bar + overflow lamp</text>
+  <g fill="#caa472" stroke="#222">
+    <rect x="330" y="124" width="9" height="40"/><rect x="356" y="124" width="9" height="40"/>
+    <rect x="382" y="124" width="9" height="40"/><rect x="408" y="124" width="9" height="40"/>
+    <rect x="434" y="124" width="9" height="40"/>
+  </g>
+  <text x="390" y="180" fill="#ddd" font-size="9.5" text-anchor="middle">5 resistors → GPIO 18·5·17·16·4 (+ lamp 2)</text>
+
+  <rect x="150" y="300" width="300" height="150" rx="6" fill="#111" stroke="#666" stroke-width="2"/>
+  <rect x="162" y="325" width="70" height="100" rx="3" fill="#9aa0a6"/>
+  <text x="197" y="378" fill="#222" font-size="10" text-anchor="middle" transform="rotate(-90 197 378)">ESP32</text>
+  <rect x="420" y="350" width="26" height="34" rx="2" fill="#888"/>
+  <text x="433" y="372" fill="#222" font-size="8" text-anchor="middle">USB</text>
+  <text x="455" y="345" fill="#9be29b" font-size="9">← 5V wall-wart</text>
+  <text x="300" y="296" fill="#bbb" font-size="10" text-anchor="middle">top:  GND 23 22 21 19 18 5 17 16 4 2 0 15 …</text>
+  <text x="300" y="468" fill="#bbb" font-size="10" text-anchor="middle">bottom:  3V3 EN VP VN 34 35 32 33 25 26 27 14 12 GND 13 … 5V</text>
+
+  <line x1="248" y1="455" x2="248" y2="545" stroke="#9be29b" stroke-width="2" marker-end="url(#ag)"/>
+  <text x="248" y="480" fill="#9be29b" font-size="10" text-anchor="middle">32</text>
+  <line x1="295" y1="455" x2="295" y2="545" stroke="#9be29b" stroke-width="2" marker-end="url(#ag)"/>
+  <text x="295" y="480" fill="#9be29b" font-size="10" text-anchor="middle">25</text>
+  <line x1="395" y1="455" x2="430" y2="545" stroke="#ffc27a" stroke-width="2" marker-end="url(#ao)"/>
+  <text x="382" y="480" fill="#ffc27a" font-size="10" text-anchor="middle">27</text>
+  <line x1="470" y1="455" x2="505" y2="545" stroke="#e58fe5" stroke-width="2" marker-end="url(#ap)"/>
+  <text x="478" y="480" fill="#e58fe5" font-size="10" text-anchor="middle">5V→boost</text>
+
+  <defs>
+    <marker id="ag" markerWidth="8" markerHeight="8" refX="4" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 Z" fill="#9be29b"/></marker>
+    <marker id="ao" markerWidth="8" markerHeight="8" refX="4" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 Z" fill="#ffc27a"/></marker>
+    <marker id="ap" markerWidth="8" markerHeight="8" refX="4" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 Z" fill="#e58fe5"/></marker>
+  </defs>
+
+  <!-- lit button 4-pin -->
+  <rect x="80" y="550" width="190" height="155" rx="6" fill="#1e3a24" stroke="#9be29b" stroke-width="2"/>
+  <text x="175" y="572" fill="#9be29b" font-size="12" text-anchor="middle">NEW 4-pin — LIT BUTTON</text>
+  <text x="92" y="595" fill="#ddd" font-size="11">1  switch → GPIO 32</text>
+  <text x="92" y="614" fill="#ddd" font-size="11">2  switch → GND</text>
+  <text x="92" y="633" fill="#ddd" font-size="11">3  LED + → 12V rail</text>
+  <text x="92" y="652" fill="#ddd" font-size="11">4  LED − → Q2 drain (GPIO 25)</text>
+  <text x="92" y="676" fill="#9be29b" font-size="10">Q2 = 2N7000/RFP30N06LE; gate←25,</text>
+  <text x="92" y="690" fill="#9be29b" font-size="10">100kΩ gate→GND; no series R</text>
+
+  <!-- buzzer 2-pin + MOSFET -->
+  <rect x="310" y="560" width="225" height="145" rx="6" fill="#3a2c12" stroke="#ffc27a" stroke-width="2"/>
+  <text x="422" y="582" fill="#ffc27a" font-size="12" text-anchor="middle">NEW 2-pin — BUZZER</text>
+  <text x="322" y="605" fill="#ddd" font-size="11">A  + → 12V rail</text>
+  <text x="322" y="624" fill="#ddd" font-size="11">B  − → Q1 drain (GPIO 27)</text>
+  <text x="322" y="650" fill="#ffc27a" font-size="11">Q1 = 2N7000/RFP30N06LE; gate←27</text>
+  <text x="322" y="668" fill="#ffc27a" font-size="11">100kΩ gate→GND · source→GND</text>
+  <text x="322" y="686" fill="#ffc27a" font-size="11">1N4148 ∥ buzzer (optional)</text>
+</svg>
+
+<div>
+<h2>Power flow (USB 5 V → ESP32; 5 V → MT3608 boost → 12 V rail)</h2>
+<pre>
+ 5V USB wall-wart ─▶ ESP32 micro-USB ─▶ powers the board (5V rail / onboard 3.3V)
+                                          │
+                       ESP32 5V pin ──────┴─▶ [MT3608 boost → 12V] ─▶ 12V RAIL ─┬─▶ buzzer +
+                                                (trim pot to 12.0 V!)            └─▶ ring LED +
+
+ GND (one common): USB − = ESP32 GND = MT3608 IN−/OUT− = both MOSFET sources = gate pull-downs
+</pre>
+<p class="note"><b>Single supply = no headaches:</b> only USB feeds the board, so there's no source-coexistence
+issue (no Schottky/diode-OR needed), and the boost shares USB ground so the common ground is automatic.
+Front-panel bar LEDs/lamp stay GPIO-driven (3.3 V), unaffected.</p>
+<div class="warn"><b>⚠ Set the MT3608 to 12.0 V before connecting the ring LED.</b> Out of the box the pot is at a
+random spot and the output can be anything up to ~28 V — power the boost from 5 V, turn the pot, and meter
+OUT to 12.0 V <i>first</i>. The buzzer (3–24 V) is forgiving; the 12 V ring LED is not.</div>
+
+<h2>New components — full list (USB + boost build)</h2>
+<table>
+<tr><th>#</th><th>Part</th><th>Spec / example</th><th>Status</th></tr>
+<tr><td colspan="4" style="background:#222;color:#e58fe5">POWER (USB 5 V + boost)</td></tr>
+<tr><td>1</td><td>5 V USB wall-wart</td><td>≥1 A (powers ESP32 via micro-USB)</td><td class="have">have</td></tr>
+<tr><td>1</td><td>MT3608 boost module</td><td>2–24 V in → adj. out; trim to 12 V</td><td class="have">have (arriving)</td></tr>
+<tr><td colspan="4" style="background:#222;color:#ffc27a">BUZZER (GPIO 27)</td></tr>
+<tr><td>1</td><td>Active piezo buzzer</td><td>DC 3-24 V 95 dB</td><td class="have">have</td></tr>
+<tr><td>1</td><td>N-MOSFET (Q1)</td><td><b>2N7000</b> (TO-92) or RFP30N06LE</td><td class="have">have</td></tr>
+<tr><td>1</td><td>Resistor 100 kΩ</td><td>gate pull-down → GND</td><td class="buy">buy</td></tr>
+<tr><td>1</td><td>Resistor ~150 Ω <i>(optional)</i></td><td>gate series</td><td class="buy">opt</td></tr>
+<tr><td>1</td><td>Diode 1N4148 <i>(optional)</i></td><td>flyback ∥ buzzer</td><td class="buy">opt</td></tr>
+<tr><td>1</td><td>2-pin JST</td><td>buzzer connector</td><td class="have">have/plan</td></tr>
+<tr><td colspan="4" style="background:#222;color:#9be29b">LIT BUTTON (sw GPIO 32 / LED GPIO 25)</td></tr>
+<tr><td>1</td><td>APIELE 12 mm momentary lit button</td><td>1NO, 12 V ring LED, IP65</td><td class="have">have</td></tr>
+<tr><td>1</td><td>N-MOSFET (Q2)</td><td><b>2N7000</b> (TO-92) or RFP30N06LE</td><td class="have">have</td></tr>
+<tr><td>1</td><td>Resistor 100 kΩ</td><td>gate pull-down → GND</td><td class="buy">buy</td></tr>
+<tr><td>1</td><td>Resistor ~150 Ω <i>(optional)</i></td><td>gate series</td><td class="buy">opt</td></tr>
+<tr><td>1</td><td>4-pin JST</td><td>2 switch + 2 LED</td><td class="have">have/plan</td></tr>
+<tr><td colspan="4" style="background:#222;color:#bbb">MISC</td></tr>
+<tr><td>—</td><td>Hookup wire, solder, heat-shrink, zip-tie (strain relief)</td><td>—</td><td>—</td></tr>
+</table>
+<p class="note">Gone vs. the earlier plan: no 12 V adapter, barrel jack, buck, or Schottky. The MT3608 replaces
+all of that. MOSFET pinouts: <b>2N7000 = S–G–D</b> (TO-92), <b>RFP30N06LE = G–D–S</b> (TO-220, tab=Drain).</p>
+</div>
+</div>
+
+<h2>Bottom-half placement detail (the empty area below the ESP32)</h2>
+<p class="note">Left→right: <span class="have">button + Q2</span> (by GPIO 32/25),
+<span class="buy">buzzer + Q1</span> (by GPIO 27/GND), <span style="color:#e58fe5">MT3608 boost</span> (fed from the 5V pin).
+Two wire-link buses along the bottom: a <b style="color:#ffb;">12 V bus</b> (from boost OUT+) and a <b>GND bus</b>.</p>
+<svg width="680" height="400" viewBox="0 0 680 400" xmlns="http://www.w3.org/2000/svg">
+  <rect x="4" y="4" width="672" height="392" rx="8" fill="#241a12" stroke="#5a4a36"/>
+  <rect x="30" y="20" width="620" height="34" rx="4" fill="#111" stroke="#666"/>
+  <text x="40" y="42" fill="#bbb" font-size="11">ESP32 bottom row →</text>
+  <text x="175" y="42" fill="#9be29b" font-size="12" font-weight="bold">32</text>
+  <text x="250" y="42" fill="#9be29b" font-size="12" font-weight="bold">25</text>
+  <text x="285" y="42" fill="#888" font-size="11">26</text>
+  <text x="315" y="42" fill="#ffc27a" font-size="12" font-weight="bold">27</text>
+  <text x="440" y="42" fill="#ccc" font-size="12" font-weight="bold">GND</text>
+  <text x="610" y="42" fill="#e58fe5" font-size="12" font-weight="bold">5V</text>
+
+  <rect x="30" y="95" width="230" height="170" rx="6" fill="#16271b" stroke="#9be29b" stroke-dasharray="5 4"/>
+  <text x="145" y="114" fill="#9be29b" font-size="12" text-anchor="middle">LIT BUTTON zone</text>
+  <rect x="45" y="130" width="95" height="60" rx="4" fill="#1e3a24" stroke="#9be29b"/>
+  <text x="92" y="155" fill="#ddd" font-size="11" text-anchor="middle">4-pin JST</text>
+  <text x="92" y="172" fill="#ddd" font-size="9.5" text-anchor="middle">sw·sw·LED+·LED−</text>
+  <rect x="178" y="142" width="34" height="34" rx="3" fill="#222" stroke="#9be29b"/><text x="195" y="163" fill="#9be29b" font-size="9" text-anchor="middle">Q2</text>
+  <text x="150" y="212" fill="#9be29b" font-size="9">gate←25 · 100k→GND</text>
+
+  <rect x="275" y="95" width="190" height="170" rx="6" fill="#2a2010" stroke="#ffc27a" stroke-dasharray="5 4"/>
+  <text x="370" y="114" fill="#ffc27a" font-size="12" text-anchor="middle">BUZZER zone</text>
+  <rect x="290" y="130" width="80" height="55" rx="4" fill="#3a2c12" stroke="#ffc27a"/>
+  <text x="330" y="153" fill="#ddd" font-size="11" text-anchor="middle">2-pin JST</text>
+  <text x="330" y="170" fill="#ddd" font-size="9.5" text-anchor="middle">+ · −</text>
+  <rect x="398" y="138" width="34" height="34" rx="3" fill="#222" stroke="#ffc27a"/><text x="415" y="159" fill="#ffc27a" font-size="9" text-anchor="middle">Q1</text>
+  <text x="300" y="208" fill="#ffc27a" font-size="9">gate←27 · 100k→GND</text>
+  <text x="300" y="226" fill="#ffc27a" font-size="9">1N4148 ∥ buzzer (opt)</text>
+
+  <rect x="480" y="95" width="170" height="170" rx="6" fill="#2a1830" stroke="#e58fe5" stroke-dasharray="5 4"/>
+  <text x="565" y="114" fill="#e58fe5" font-size="12" text-anchor="middle">POWER zone</text>
+  <rect x="495" y="135" width="115" height="60" rx="4" fill="#3a2348" stroke="#e58fe5"/>
+  <text x="552" y="158" fill="#ddd" font-size="11" text-anchor="middle">MT3608 boost</text>
+  <text x="552" y="174" fill="#ddd" font-size="9" text-anchor="middle">IN±(5V) · OUT±(12V)</text>
+  <text x="552" y="188" fill="#ffd479" font-size="9" text-anchor="middle">trim to 12.0V first!</text>
+  <text x="565" y="220" fill="#e58fe5" font-size="9" text-anchor="middle">IN+ ← ESP32 5V pin</text>
+  <text x="565" y="234" fill="#e58fe5" font-size="9" text-anchor="middle">OUT+ → 12V bus</text>
+
+  <line x1="30" y1="305" x2="650" y2="305" stroke="#ffb000" stroke-width="3"/>
+  <text x="35" y="300" fill="#ffb000" font-size="11">12 V bus  (boost OUT+ → buzzer+, LED+)</text>
+  <line x1="30" y1="345" x2="650" y2="345" stroke="#aaa" stroke-width="3"/>
+  <text x="35" y="340" fill="#ccc" font-size="11">GND bus  (← ESP32 GND; boost IN−/OUT−, both MOSFET sources, gate pull-downs)</text>
+
+  <line x1="175" y1="54" x2="120" y2="130" stroke="#9be29b" stroke-width="1.5"/>
+  <line x1="250" y1="54" x2="195" y2="142" stroke="#9be29b" stroke-width="1.5"/>
+  <line x1="315" y1="54" x2="415" y2="138" stroke="#ffc27a" stroke-width="1.5"/>
+  <line x1="610" y1="54" x2="552" y2="135" stroke="#e58fe5" stroke-width="1.5"/>
+</svg>
+
+<h2>Exact connection list (USB + boost, MOSFET switches)</h2>
+<table>
+<tr><th>Net</th><th>Connections</th></tr>
+<tr><td><b style="color:#e58fe5;">5 V</b></td><td>USB wall-wart powers the ESP32 (micro-USB). <b>ESP32 5V pin → MT3608 IN+.</b></td></tr>
+<tr><td><b style="color:#ffb000;">12 V bus</b></td><td>MT3608 OUT+ · buzzer “+” · button LED “+”  <i>(never touches any ESP32 pin)</i></td></tr>
+<tr><td><b>GND bus</b></td><td>ESP32 GND · MT3608 IN− · MT3608 OUT− · Q1 source · Q2 source · both 100 kΩ gate pull-downs · button switch pin-2</td></tr>
+<tr><td><b style="color:#ffc27a;">Buzzer (Q1)</b></td><td>GPIO27 →(opt 150 Ω)→ Q1 <b>gate</b> · Q1 gate →100 kΩ→ GND · Q1 <b>source</b>→GND · Q1 <b>drain</b>→ buzzer “−” · buzzer “+”→12 V · (1N4148 across buzzer)</td></tr>
+<tr><td><b style="color:#9be29b;">Ring LED (Q2)</b></td><td>GPIO25 →(opt 150 Ω)→ Q2 <b>gate</b> · Q2 gate →100 kΩ→ GND · Q2 <b>source</b>→GND · Q2 <b>drain</b>→ button LED “−” · button LED “+”→12 V</td></tr>
+<tr><td><b style="color:#9be29b;">Button switch</b></td><td>switch pin-1 → GPIO32 · switch pin-2 → GND bus</td></tr>
+</table>
+<p class="note"><b>MOSFET pinouts:</b> 2N7000 (TO-92) = <b>S–G–D</b>; RFP30N06LE (TO-220) = <b>G–D–S</b>, tab=Drain.
+The 2N7000's small TO-92 fits the board best for these tiny loads.</p>
+<p class="warn" style="display:block"><b>Build order tip:</b> wire & power the MT3608 from 5 V and <b>set OUT to 12.0 V</b> with a meter
+<i>before</i> connecting it to the buzzer/ring-LED rail.</p>
+</body>
+</html>
