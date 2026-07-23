@@ -47,6 +47,15 @@
 // ====== WIFI (networks + priority order live in secrets.h; falls through on failure, then cycles) ======
 const unsigned long WIFI_ATTEMPT_MS = 10000UL; // per-network connect timeout
 
+// ====== NTP ======
+// Readings are only buffered once the clock is real (see loop()), so an unsynced clock
+// means NO telemetry at all — not just wrong timestamps. The boot-time sync attempt fails
+// whenever the device powers up out of WiFi range, and ESP-IDF's background SNTP client
+// only retries about hourly. serviceNtp() re-arms on every down->up WiFi transition so a
+// device that has been offline starts logging within seconds of a network appearing.
+const time_t        NTP_VALID_EPOCH = 1700000000; // any time_t above this is a real clock
+const unsigned long NTP_REARM_MS    = 60000UL;    // while online but unsynced, retry this often
+
 // ====== INFLUXDB (via Caddy HTTPS reverse proxy) ======
 const char* INFLUX_WRITE_URL =
     "https://stjoesdrain.eastus.cloudapp.azure.com/api/v2/write?org=stjoes&bucket=drain&precision=s";
@@ -63,7 +72,7 @@ const char* DEVICE_TAG = "drain-1";
 //
 // >>> BUMP FW_VERSION ON EVERY RELEASE. The manifest's version must EXCEED this to
 //     trigger an update; equal or lower is a no-op, which is what stops reflash loops.
-const int FW_VERSION = 2;
+const int FW_VERSION = 3;
 const char* OTA_MANIFEST_URL =
     "https://raw.githubusercontent.com/SsimonSA/church-drain-monitor/main/firmware/ota/manifest.txt";
 const unsigned long OTA_CHECK_INTERVAL_MS = 6UL * 3600UL * 1000UL;  // re-check every 6 h
@@ -348,8 +357,15 @@ void enqueue(uint32_t t, float in, float rawCm, int16_t rssi, int16_t kept, int1
 
 bool flushBuffer() {
   if (rcount == 0) return true;
+  // SSID of the link carrying this batch, as a line-protocol string field. A field (not a
+  // tag) keeps series cardinality fixed, and spaces need no escaping inside the quotes.
+  // It reflects the network at FLUSH time, which is the one that actually delivered these
+  // points — buffered readings may have been taken while offline or on another network.
+  String ssid = WiFi.SSID();
+  ssid.replace("\\", "\\\\");
+  ssid.replace("\"", "\\\"");
   String body;
-  body.reserve(rcount * 96);
+  body.reserve(rcount * 128);
   for (int i = 0; i < rcount; i++) {
     body += "depth,device=";  body += DEVICE_TAG;
     body += " inches=";       body += String(rbuf[i].in, 2);
@@ -358,6 +374,7 @@ bool flushBuffer() {
     body += ",pings_outwin="; body += rbuf[i].outWin; body += "i";
     body += ",pings_noecho="; body += rbuf[i].noEcho; body += "i";
     body += ",rssi=";         body += rbuf[i].rssi;   body += "i";
+    body += ",ssid=\"";       body += ssid;           body += "\"";  // which network delivered this batch
     body += ",fw=";           body += FW_VERSION;         body += "i";   // running firmware version -> Grafana shows which units updated
     body += ",rst=";          body += (int)g_resetReason; body += "i ";  // last reset reason -> annotate reboots (brownout vs crash vs OTA)
     body += rbuf[i].t;        body += "\n";
@@ -421,6 +438,36 @@ void ensureWifi() {
     idx = (idx + 1) % N_WIFI;   // this one didn't take — try the next in order
     attempting = false;
   }
+}
+
+// ---------- NTP ----------
+void startNtp() { configTime(0, 0, "pool.ntp.org", "time.nist.gov"); }
+
+// Non-blocking. Keeps the clock chasing a real value whenever there's a network, because
+// an unsynced clock silently suppresses ALL telemetry (the enqueue gate in loop()).
+void serviceNtp() {
+  static bool wasUp = false;
+  static bool announced = false;
+  static unsigned long lastArm = 0;
+  bool up     = (WiFi.status() == WL_CONNECTED);
+  bool synced = (time(nullptr) > NTP_VALID_EPOCH);
+  unsigned long now = millis();
+
+  if (up && !wasUp) {                 // link just came back — re-arm immediately
+    Serial.println(F("NTP: WiFi up — re-arming sync"));
+    startNtp();
+    lastArm = now;
+  } else if (up && !synced && now - lastArm >= NTP_REARM_MS) {
+    startNtp();                       // still stale; nudge it rather than wait out SNTP's ~1h retry
+    lastArm = now;
+  }
+  wasUp = up;
+
+  if (synced && !announced) {         // announce once so the serial log shows when logging began
+    Serial.printf("NTP: clock valid (epoch=%lu) — telemetry enabled\n", (unsigned long)time(nullptr));
+    announced = true;
+  }
+  if (!synced) announced = false;     // re-announce if we ever lose it
 }
 
 // ---------- OTA (pull) ----------
@@ -581,9 +628,9 @@ void setup() {
     Serial.println("WiFi: none up at boot — loop() will keep cycling them");
   }
 
-  configTime(0, 0, "pool.ntp.org", "time.nist.gov");
+  startNtp();
   Serial.print("NTP: syncing");
-  for (int i = 0; i < 30 && time(nullptr) < 1700000000UL; i++) { delay(500); Serial.print("."); }
+  for (int i = 0; i < 30 && time(nullptr) < NTP_VALID_EPOCH; i++) { delay(500); Serial.print("."); }
   Serial.println();
   Serial.printf("NTP: epoch=%lu\n", (unsigned long)time(nullptr));
 
@@ -603,6 +650,7 @@ void loop() {
   if (ms - lastSampleMs >= SAMPLE_INTERVAL_MS) {
     lastSampleMs = ms;
     ensureWifi();
+    serviceNtp();              // re-arm the clock on reconnect — without it, telemetry stays gated off
     markValidatedIfStable();   // once we've run stably, mark this firmware good (network-independent)
 
     float lvl = readLevelInches();
@@ -633,7 +681,7 @@ void loop() {
     }
     if (doEnqueue) {
       uint32_t epoch = (uint32_t)time(nullptr);
-      if (epoch > 1700000000UL) {
+      if (epoch > (uint32_t)NTP_VALID_EPOCH) {
         enqueue(epoch, lvl, g_rawCm, (int16_t)WiFi.RSSI(),
                 (int16_t)g_kept, (int16_t)g_outWin, (int16_t)g_noEcho);
         lastEnqueueMs = ms;
