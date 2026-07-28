@@ -11,7 +11,26 @@
  *   (lamp keeps blinking); LONG press (~2 s) = master mute toggle (buzzer on/off,
  *   persists across events, re-arms on reboot).
  * - Cloud telemetry: posts depth to InfluxDB (via Caddy/HTTPS) for the Grafana
- *   dashboard, with adaptive cadence + NTP timestamps + offline ring buffer.
+ *   dashboard, with adaptive cadence + offline store-and-forward.
+ *
+ * STORE AND FORWARD
+ *   Readings are stamped with UPTIME, not wall-clock, so logging never depends on
+ *   having had a network. When NTP eventually lands we learn the epoch at uptime 0
+ *   and back-date the whole backlog on its way out. A device that powers up out of
+ *   range still records everything; it just delivers late. The backlog leaves in
+ *   bounded chunks (never one giant POST) and drains flat out only while the water
+ *   is low, so a backfill can't stall the alarm.
+ *
+ *   The queue lives in FLASH (LittleFS, two rotating files ~45k readings total), so
+ *   it survives reboots, brownouts and power cuts — RAM holds only a small staging
+ *   batch. If the filesystem can't be mounted the firmware falls back to the old
+ *   RAM-only ring buffer rather than losing telemetry outright.
+ *
+ * LOCAL HISTORY DOWNLOAD
+ *   The device also serves its own log over plain HTTP on the LAN:
+ *     http://drain.local/log.csv   (or http://<ip>/log.csv — the IP is in telemetry)
+ *   Park next to the box, turn on a hotspot, open the URL. This path needs no
+ *   InfluxDB, no token, no retention window and no internet at all.
  *
  * The LED bar / lamp / buzzer are driven from the ESP32's OWN reading every loop,
  * independent of the network — the box is a self-contained alarm first, a cloud
@@ -38,6 +57,9 @@
 #include <WiFiClientSecure.h>
 #include <HTTPClient.h>
 #include <HTTPUpdate.h>   // pull-based OTA (device fetches a manifest, self-flashes from a GitHub release)
+#include <WebServer.h>    // on-device /log.csv download (grab history without the cloud path)
+#include <ESPmDNS.h>      // advertise drain.local so you needn't hunt for a DHCP address
+#include <LittleFS.h>     // persistent reading log — survives reboot, brownout, power loss
 #include <Preferences.h>  // NVS-backed boot/version state for the post-update self-check
 #include <esp_system.h>   // esp_reset_reason()
 #include <time.h>
@@ -48,11 +70,12 @@
 const unsigned long WIFI_ATTEMPT_MS = 10000UL; // per-network connect timeout
 
 // ====== NTP ======
-// Readings are only buffered once the clock is real (see loop()), so an unsynced clock
-// means NO telemetry at all — not just wrong timestamps. The boot-time sync attempt fails
-// whenever the device powers up out of WiFi range, and ESP-IDF's background SNTP client
-// only retries about hourly. serviceNtp() re-arms on every down->up WiFi transition so a
-// device that has been offline starts logging within seconds of a network appearing.
+// The clock no longer gates LOGGING (readings carry uptime and are back-dated at flush
+// time — see g_bootEpoch), but it still gates DELIVERY, since InfluxDB needs absolute
+// timestamps. The boot-time sync attempt fails whenever the device powers up out of WiFi
+// range, and ESP-IDF's background SNTP client only retries about hourly. serviceNtp()
+// re-arms on every down->up WiFi transition so a device that has been offline can ship
+// its backlog within seconds of a network appearing.
 const time_t        NTP_VALID_EPOCH = 1700000000; // any time_t above this is a real clock
 const unsigned long NTP_REARM_MS    = 60000UL;    // while online but unsynced, retry this often
 
@@ -72,7 +95,7 @@ const char* DEVICE_TAG = "drain-1";
 //
 // >>> BUMP FW_VERSION ON EVERY RELEASE. The manifest's version must EXCEED this to
 //     trigger an update; equal or lower is a no-op, which is what stops reflash loops.
-const int FW_VERSION = 3;
+const int FW_VERSION = 5;
 const char* OTA_MANIFEST_URL =
     "https://raw.githubusercontent.com/SsimonSA/church-drain-monitor/main/firmware/ota/manifest.txt";
 const unsigned long OTA_CHECK_INTERVAL_MS = 6UL * 3600UL * 1000UL;  // re-check every 6 h
@@ -82,6 +105,7 @@ const unsigned long OTA_FIRST_CHECK_MS    = 60000UL;               // first chec
 // Post-update self-check: prove a new binary is healthy LOCALLY (no network needed).
 const unsigned long VALIDATE_STABLE_MS = 60000UL;  // run this long without a crash -> mark the firmware good
 const int OTA_BAD_BOOT_LIMIT = 3;                  // this many firmware-CRASH reboots since an update -> loud SUSPECT warning
+                                                   // AND safe mode (see g_safeMode)
 
 // ====== SENSOR (HC-SR04) ======
 const int   TRIG_PIN = 22;   // reused from old VL53 I2C (SCL); direct 3.3V drive OK
@@ -159,17 +183,103 @@ const unsigned long SLOW_INTERVAL_MS   = 600000UL; // 10 min heartbeat once calm
 const unsigned long WATCHDOG_MS        = 1800000UL;
 const float TELEMETRY_THRESHOLD = 0.5f;            // active/calm boundary for sending
 
-// ====== buffered readings (ring buffer) ======
-struct Reading { uint32_t t; float in; float rawCm; int16_t rssi; int16_t kept; int16_t outWin; int16_t noEcho; };
+// ====== buffered readings ======
+// A reading is timestamped one of two ways, distinguished by RD_RESOLVED:
+//   resolved   -> `t` is a real epoch, settled for good
+//   unresolved -> `t` is seconds since the boot of session `sess`
+// Uptime alone was enough while the queue lived in RAM, but the flash log now OUTLIVES
+// reboots, and uptime restarts at zero on each one. Anchoring an old record to the current
+// boot's epoch would scatter history across the wrong days — worse than not sending it —
+// so every record carries the session it was measured in and is only ever dated against
+// that session's own anchor. See resolveEpoch().
+const uint16_t RD_RESOLVED = 0x0001;
+struct Reading {
+  uint32_t t;                                        // epoch if resolved, else uptime seconds
+  float in; float rawCm;
+  int16_t rssi; int16_t kept; int16_t outWin; int16_t noEcho;
+  uint16_t sess;                                     // boot session that measured this
+  uint16_t flags;
+};
+// The on-flash log stores these verbatim, so the size is part of the file format: a change
+// here silently misreads every older record. Bump LOG_MAGIC below if this struct changes.
+static_assert(sizeof(Reading) == 24, "Reading size is the on-flash record size — bump LOG_MAGIC if you change it");
+
+// RAM staging. With the filesystem up this is just a write-behind batch on its way to
+// flash; if the mount failed it degrades into the old standalone ring buffer.
 const int BUF_MAX = 2000;
 Reading rbuf[BUF_MAX];
 int rcount = 0;
+
+// Backlog leaves in bounded batches: ~200 points is ~30 KB of line protocol, which the
+// heap can hold comfortably. One giant POST of a full buffer would both blow memory and
+// freeze the alarm for the length of the upload.
+const int FLUSH_CHUNK = 200;
+
+// ====== persistent log (LittleFS) ======
+// Two files used as a coarse ring: we always append to the ACTIVE one and, when it fills,
+// delete the other (the older generation) and start writing there. Coarse rotation rather
+// than a true record-level ring because deleting from the front of a file isn't a thing —
+// the cost is that the backlog drops in ~448 KB steps rather than one reading at a time.
+//
+// Sizing: the `spiffs` partition in default.csv is ~1.4 MB; 2 x 448 KB leaves LittleFS
+// plenty of free blocks (it degrades badly near full) and holds ~45,000 readings — about
+// 12 h of continuous 1 Hz logging during a backup, or ~10 months of calm heartbeats.
+const char*  LOG_PATH[2]    = { "/log0.bin", "/log1.bin" };
+const size_t LOG_FILE_MAX   = 448UL * 1024UL;
+const size_t LOG_RECSZ      = sizeof(Reading);
+const uint32_t LOG_MAGIC    = 0x44524E32UL;   // 'DRN2' — record-format version guard
+// Write-behind policy: batch records so a flash page isn't burned per reading, but never
+// hold data in volatile RAM for long — the whole point is surviving an unannounced power cut.
+const int           LOG_COMMIT_N  = 32;
+const unsigned long LOG_COMMIT_MS = 60000UL;
+
+bool     g_fsOk    = false;   // false -> RAM-only fallback (see rbuf)
+uint8_t  g_logAct  = 0;       // file we append to
+uint8_t  g_logRd   = 0;       // file we are delivering from
+uint32_t g_logOff  = 0;       // byte offset of the next undelivered record in g_logRd
+uint16_t g_sess    = 0;       // this boot's session id (NVS counter, increments every boot)
+// The most recent PREVIOUS session that managed to learn an epoch anchor. Records committed
+// early in that session — before its own NTP sync landed — are still sitting unresolved in
+// the log, and this is what lets a later boot date them instead of discarding them.
+uint16_t g_anchSess  = 0;
+uint32_t g_anchEpoch = 0;
+Preferences logPrefs;
+unsigned long lastCommitMs = 0;
+// Undelivered-record count, refreshed once per sample tick and decremented as chunks land.
+// Cached because the true count needs a filesystem stat, and the burst-drain test below
+// runs every loop iteration (~200 Hz) — statting flash that often would be absurd.
+uint32_t g_pending = 0;
 
 // ====== diagnostics from the most recent reading (raw distance + ping quality) ======
 float g_rawCm  = NAN;   // median of the in-window pings, in cm (pre-calibration distance)
 int   g_kept   = 0;     // pings that landed inside the plausibility window
 int   g_outWin = 0;     // pings with an echo but outside the window (gate-rejected)
 int   g_noEcho = 0;     // pings with no echo at all
+
+// ====== uptime / absolute-time anchor ======
+// Epoch corresponding to uptime 0, or 0 while still unknown. Learned once, the first time
+// NTP produces a real clock: bootEpoch = now - uptime. Every buffered reading then becomes
+// absolute (bootEpoch + up) — including the ones recorded hours earlier with no clock at
+// all. This is the whole trick behind offline logging.
+//
+// It survives a soft reboot for free: ESP.restart() and the OTA reboot keep the RTC domain
+// powered, so time() is already valid in setup() and the anchor is re-established on the
+// first serviceNtp() call. Only a true power cycle loses it — and readings taken during a
+// powered-down-then-offline stretch genuinely have no recoverable absolute time. A
+// battery-backed RTC (DS3231) would close that last gap if the site ever needs it.
+uint32_t g_bootEpoch = 0;
+
+// millis() wraps every ~49.7 days; this accumulates across the wrap so a long offline
+// stretch can't fold the backlog's timestamps back on themselves. Safe because it is
+// called at least once per sample tick, far more often than the wrap period.
+uint32_t uptimeSec() {
+  static uint32_t lastMs = 0;
+  static uint32_t wraps  = 0;
+  uint32_t ms = millis();
+  if (ms < lastMs) wraps++;
+  lastMs = ms;
+  return (uint32_t)(((uint64_t)wraps * 4294967296ULL + ms) / 1000ULL);
+}
 
 // ====== state ======
 unsigned long lastSampleMs = 0;
@@ -183,6 +293,13 @@ esp_reset_reason_t g_resetReason = ESP_RST_UNKNOWN;
 bool     g_pendingValidation = false;   // running an as-yet-unproven firmware
 uint32_t g_bootCount = 0;
 uint32_t g_badBoots  = 0;               // consecutive firmware-crash reboots since last good boot
+// After OTA_BAD_BOOT_LIMIT firmware crashes we stop starting the subsystems that are not
+// needed to warn somebody about water on the floor — the filesystem and the web server.
+// The box has no auto-rollback (the Arduino bootloader isn't built with it) and recovery
+// means a USB reflash on site, so the failure mode that actually matters is "the alarm
+// stopped working". Whatever is crashing, the LED bar, lamp and buzzer still run: they
+// depend only on the sensor and are driven before any of this is touched.
+bool     g_safeMode  = false;
 unsigned long g_bootMs = 0;
 bool isBelow = false;
 unsigned long belowSinceMs = 0;
@@ -346,17 +463,223 @@ void serviceFast() {
   serviceButtonLed();
 }
 
+// ---------- persistent log ----------
+// The absolute time of a reading, or 0 if it can never be known. A record is datable if it
+// was already resolved when written, or if it belongs to a session whose anchor we hold —
+// this boot's, or the last previous boot that got one. Anything older stays undated: it is
+// kept in the log (the shape of the history is still readable over /log.csv via uptime)
+// but is never sent to InfluxDB, because a guessed timestamp would corrupt the dashboard.
+uint32_t resolveEpoch(const Reading& r) {
+  if (r.flags & RD_RESOLVED)                     return r.t;
+  if (r.sess == g_sess     && g_bootEpoch)       return g_bootEpoch + r.t;
+  if (r.sess == g_anchSess && g_anchEpoch)       return g_anchEpoch + r.t;
+  return 0;
+}
+
+// Delivery cursor (which file, how far in) lives in NVS so a reboot mid-backlog resumes
+// where it left off instead of replaying or dropping. Losing this is not fatal — Influx
+// overwrites on identical measurement+tags+timestamp, so a replayed chunk is a no-op.
+void logSaveState() {
+  logPrefs.putUChar("act", g_logAct);
+  logPrefs.putUChar("rd",  g_logRd);
+  logPrefs.putUInt ("off", g_logOff);
+}
+
+size_t logFileSize(int i) {
+  File f = LittleFS.open(LOG_PATH[i], "r");
+  if (!f) return 0;
+  size_t s = f.size();
+  f.close();
+  return s;
+}
+
+void logInit() {
+  g_fsOk = LittleFS.begin(true);          // true = format if the partition is blank/corrupt
+  if (!g_fsOk) {
+    Serial.println(F("LOG: LittleFS mount FAILED — falling back to RAM-only buffering"));
+    return;
+  }
+  logPrefs.begin("log", false);
+
+  // New boot = new session. Every reading taken from here on is stamped with it, which is
+  // what keeps this boot's uptimes from being applied to an earlier boot's records.
+  g_sess = (uint16_t)(logPrefs.getUShort("sess", 0) + 1);
+  logPrefs.putUShort("sess", g_sess);
+  g_anchSess  = logPrefs.getUShort("asess",  0);
+  g_anchEpoch = logPrefs.getUInt  ("aepoch", 0);
+
+  // A record-format change invalidates every stored byte; start clean rather than emit
+  // garbage depth values into Grafana.
+  if (logPrefs.getUInt("magic", 0) != LOG_MAGIC) {
+    Serial.println(F("LOG: record format changed — wiping old log"));
+    LittleFS.remove(LOG_PATH[0]);
+    LittleFS.remove(LOG_PATH[1]);
+    logPrefs.putUInt("magic", LOG_MAGIC);
+    g_logAct = 0; g_logRd = 0; g_logOff = 0;
+    logSaveState();
+  } else {
+    g_logAct = logPrefs.getUChar("act", 0);
+    g_logRd  = logPrefs.getUChar("rd",  0);
+    g_logOff = logPrefs.getUInt ("off", 0);
+    if (g_logAct > 1) g_logAct = 0;
+    if (g_logRd  > 1) g_logRd  = 0;
+    // A truncated final record (power cut mid-write) would desync every later read, so
+    // snap the cursor back to a record boundary and clamp it inside the file.
+    g_logOff -= (g_logOff % LOG_RECSZ);
+    if (g_logOff > logFileSize(g_logRd)) g_logOff = logFileSize(g_logRd);
+  }
+  Serial.printf("LOG: mounted — session=%u active=%d read=%d off=%lu  sizes %u/%u bytes"
+                "  (prev anchored session %u @ %lu)\n",
+                g_sess, g_logAct, g_logRd, (unsigned long)g_logOff,
+                (unsigned)logFileSize(0), (unsigned)logFileSize(1),
+                g_anchSess, (unsigned long)g_anchEpoch);
+}
+
+// Retire the oldest generation and start appending into its slot.
+void logRotate() {
+  int oldAct = g_logAct;
+  int newAct = 1 - oldAct;
+  Serial.printf("LOG: rotating — discarding %s (%u bytes, oldest history)\n",
+                LOG_PATH[newAct], (unsigned)logFileSize(newAct));
+  LittleFS.remove(LOG_PATH[newAct]);
+  // If we were still delivering out of the file we just deleted, its undelivered tail went
+  // with it; the only data left is the file we were appending to.
+  if (g_logRd == newAct) { g_logRd = oldAct; g_logOff = 0; }
+  g_logAct = newAct;
+  logSaveState();
+}
+
+// Push the RAM staging batch into flash. Called before every read and on a size/time
+// trigger, so at most LOG_COMMIT_MS of readings are ever exposed to a power cut.
+void logCommit() {
+  if (!g_fsOk || rcount == 0) return;
+
+  // Settle timestamps BEFORE they hit flash wherever we can. A record written as a real
+  // epoch needs no session context ever again, so it stays datable across any number of
+  // future reboots — the session/anchor machinery is then only carrying the records taken
+  // while this boot was still waiting on NTP.
+  if (g_bootEpoch) {
+    for (int i = 0; i < rcount; i++) {
+      if (!(rbuf[i].flags & RD_RESOLVED)) {
+        rbuf[i].t     = g_bootEpoch + rbuf[i].t;
+        rbuf[i].flags |= RD_RESOLVED;
+      }
+    }
+  }
+
+  size_t need = (size_t)rcount * LOG_RECSZ;
+  if (logFileSize(g_logAct) + need > LOG_FILE_MAX) logRotate();
+
+  File f = LittleFS.open(LOG_PATH[g_logAct], "a");
+  if (!f) { Serial.println(F("LOG: append open failed — holding batch in RAM")); return; }
+  size_t wrote = f.write((const uint8_t*)rbuf, need);
+  f.close();                              // close flushes; batch is durable past this point
+  if (wrote != need) {
+    // Partial write (filesystem full or failing). Keep the batch staged and let the next
+    // commit retry after a rotation frees space.
+    Serial.printf("LOG: short write %u/%u — keeping batch staged\n", (unsigned)wrote, (unsigned)need);
+    return;
+  }
+  rcount = 0;
+  lastCommitMs = millis();
+}
+
+// Records recorded but not yet delivered.
+uint32_t logPendingRecords() {
+  if (!g_fsOk) return rcount;
+  uint32_t bytes = 0;
+  if (g_logRd == g_logAct) {
+    size_t s = logFileSize(g_logAct);
+    bytes = (s > g_logOff) ? (s - g_logOff) : 0;
+  } else {
+    size_t sr = logFileSize(g_logRd);
+    bytes = ((sr > g_logOff) ? (sr - g_logOff) : 0) + logFileSize(g_logAct);
+  }
+  return bytes / LOG_RECSZ + rcount;      // + whatever is still staged in RAM
+}
+
+// Copy up to `max` of the oldest undelivered records into `out`.
+// Retires a spent older generation itself rather than relying solely on logAdvance(): a
+// file whose byte length isn't an exact multiple of the record size (power cut mid-write)
+// leaves the cursor short of EOF forever, which would wedge delivery permanently.
+int logRead(Reading* out, int max) {
+  if (!g_fsOk) return 0;
+  for (int attempt = 0; attempt < 2; attempt++) {
+    int n = 0;
+    File f = LittleFS.open(LOG_PATH[g_logRd], "r");
+    if (f) {
+      if (g_logOff < f.size() && f.seek(g_logOff))
+        n = f.read((uint8_t*)out, (size_t)max * LOG_RECSZ) / LOG_RECSZ;
+      f.close();
+    }
+    if (n > 0) return n;
+    if (g_logRd == g_logAct) return 0;      // caught up with the live file — nothing more
+    LittleFS.remove(LOG_PATH[g_logRd]);     // spent (or torn) older generation — reclaim it
+    g_logRd  = g_logAct;
+    g_logOff = 0;
+    logSaveState();
+  }
+  return 0;
+}
+
+// Mark `n` records delivered, stepping to the next file once this one is exhausted.
+void logAdvance(int n) {
+  if (!g_fsOk) return;
+  g_logOff += (uint32_t)n * LOG_RECSZ;
+  if (g_logRd != g_logAct && g_logOff >= logFileSize(g_logRd)) {
+    LittleFS.remove(LOG_PATH[g_logRd]);   // fully delivered — reclaim it
+    g_logRd  = g_logAct;
+    g_logOff = 0;
+  }
+  logSaveState();
+}
+
 // ---------- buffer / network ----------
-void enqueue(uint32_t t, float in, float rawCm, int16_t rssi, int16_t kept, int16_t outWin, int16_t noEcho) {
+// `up` is uptime seconds (see struct Reading). No clock is required to buffer — that is
+// the point: a box that boots out of WiFi range still records its whole history.
+void enqueue(uint32_t up, float in, float rawCm, int16_t rssi, int16_t kept, int16_t outWin, int16_t noEcho) {
   if (rcount >= BUF_MAX) {
+    // With the filesystem up this only happens if flash writes are failing; without it,
+    // this IS the buffer and dropping the oldest is the intended ring behaviour.
     memmove(rbuf, rbuf + 1, sizeof(Reading) * (BUF_MAX - 1));
     rcount = BUF_MAX - 1;
   }
-  rbuf[rcount++] = { t, in, rawCm, rssi, kept, outWin, noEcho };
+  rbuf[rcount++] = { up, in, rawCm, rssi, kept, outWin, noEcho, g_sess, 0 };
+  if (rcount >= LOG_COMMIT_N) logCommit();
 }
 
-bool flushBuffer() {
-  if (rcount == 0) return true;
+// Time-based half of the write-behind policy: during calm 10-minute heartbeats a batch
+// would otherwise sit in RAM for hours.
+void serviceLogCommit() {
+  if (rcount > 0 && millis() - lastCommitMs >= LOG_COMMIT_MS) logCommit();
+}
+
+// Ships up to FLUSH_CHUNK of the OLDEST buffered readings and drops them on success.
+// Returns true only if something was actually delivered.
+//
+// Chunked rather than all-at-once for two reasons: a full buffer would be megabytes of
+// line protocol (heap death), and a single upload that long would freeze the local alarm.
+// Delivered points are removed only after a 2xx, so a failed or half-sent batch is simply
+// retried — and because InfluxDB overwrites on identical measurement+tags+timestamp, a
+// duplicate retry is harmless rather than a double-count.
+bool flushChunk() {
+  // Need at least one usable anchor. The previous session's counts too: NTP can be blocked
+  // (UDP 123 filtered on a guest network) while HTTPS works fine, and in that case an older
+  // anchor is the only thing that makes the backlog deliverable at all.
+  if (g_bootEpoch == 0 && g_anchEpoch == 0) return false;
+
+  // Source of truth is the flash log when it mounted, the RAM ring when it didn't.
+  static Reading batch[FLUSH_CHUNK];
+  int n = 0;
+  if (g_fsOk) {
+    logCommit();                        // make sure just-taken readings are in the file first
+    n = logRead(batch, FLUSH_CHUNK);
+  } else {
+    n = (rcount < FLUSH_CHUNK) ? rcount : FLUSH_CHUNK;
+    memcpy(batch, rbuf, (size_t)n * sizeof(Reading));
+  }
+  if (n == 0) return false;
+
   // SSID of the link carrying this batch, as a line-protocol string field. A field (not a
   // tag) keeps series cardinality fixed, and spaces need no escaping inside the quotes.
   // It reflects the network at FLUSH time, which is the one that actually delivered these
@@ -365,20 +688,40 @@ bool flushBuffer() {
   ssid.replace("\\", "\\\\");
   ssid.replace("\"", "\\\"");
   String body;
-  body.reserve(rcount * 128);
-  for (int i = 0; i < rcount; i++) {
+  body.reserve(n * 200);               // reserved up front so String never doubles mid-build
+  String ip = WiFi.localIP().toString();   // where to reach /log.csv on this network
+  int sent = 0, undatable = 0;
+  for (int i = 0; i < n; i++) {
+    uint32_t epoch = resolveEpoch(batch[i]);
+    if (epoch == 0) { undatable++; continue; }   // pre-anchor record from a long-dead session
+    sent++;
     body += "depth,device=";  body += DEVICE_TAG;
-    body += " inches=";       body += String(rbuf[i].in, 2);
-    body += ",raw_cm=";       body += String(rbuf[i].rawCm, 2);
-    body += ",pings_kept=";   body += rbuf[i].kept;   body += "i";
-    body += ",pings_outwin="; body += rbuf[i].outWin; body += "i";
-    body += ",pings_noecho="; body += rbuf[i].noEcho; body += "i";
-    body += ",rssi=";         body += rbuf[i].rssi;   body += "i";
+    body += " inches=";       body += String(batch[i].in, 2);
+    body += ",raw_cm=";       body += String(batch[i].rawCm, 2);
+    body += ",pings_kept=";   body += batch[i].kept;   body += "i";
+    body += ",pings_outwin="; body += batch[i].outWin; body += "i";
+    body += ",pings_noecho="; body += batch[i].noEcho; body += "i";
+    body += ",rssi=";         body += batch[i].rssi;   body += "i";
     body += ",ssid=\"";       body += ssid;           body += "\"";  // which network delivered this batch
+    body += ",ip=\"";         body += ip;             body += "\"";  // dashboard shows the /log.csv address
     body += ",fw=";           body += FW_VERSION;         body += "i";   // running firmware version -> Grafana shows which units updated
     body += ",rst=";          body += (int)g_resetReason; body += "i ";  // last reset reason -> annotate reboots (brownout vs crash vs OTA)
-    body += rbuf[i].t;        body += "\n";
+    body += epoch;                        // resolved absolute time, back-dating the backlog
+    body += "\n";
   }
+  if (undatable)
+    Serial.printf("FLUSH: %d record(s) from an unanchored earlier session — kept for /log.csv, not sent\n",
+                  undatable);
+
+  // Whole chunk was undatable: nothing to POST, but the cursor must still move or delivery
+  // would wedge here forever.
+  if (sent == 0) {
+    if (g_fsOk) logAdvance(n);
+    else { rcount -= n; if (rcount > 0) memmove(rbuf, rbuf + n, sizeof(Reading) * rcount); }
+    g_pending = (g_pending > (uint32_t)n) ? g_pending - n : 0;
+    return true;
+  }
+
   WiFiClientSecure client;
   client.setInsecure();
   HTTPClient http;
@@ -388,8 +731,24 @@ bool flushBuffer() {
   http.addHeader("Content-Type", "text/plain; charset=utf-8");
   int code = http.POST(body);
   http.end();
+
   bool ok = (code >= 200 && code < 300);
-  if (ok) rcount = 0;
+  if (ok) {
+    if (g_fsOk) logAdvance(n);
+    else {
+      rcount -= n;
+      if (rcount > 0) memmove(rbuf, rbuf + n, sizeof(Reading) * rcount);   // keep oldest-first order
+    }
+    g_pending = (g_pending > (uint32_t)n) ? g_pending - n : 0;
+  } else {
+    // 4xx here is usually "points beyond retention period" — a backlog older than the
+    // bucket's retention window is rejected outright. Logged loudly because it looks
+    // identical to a network failure from the device's side but needs a server-side fix.
+    // (The on-device /log.csv download is unaffected by retention, which is part of why
+    // it exists.)
+    Serial.printf("FLUSH: HTTP %d for %d pts (oldest t=%lu) — retrying\n",
+                  code, sent, (unsigned long)resolveEpoch(batch[0]));
+  }
   return ok;
 }
 
@@ -443,8 +802,9 @@ void ensureWifi() {
 // ---------- NTP ----------
 void startNtp() { configTime(0, 0, "pool.ntp.org", "time.nist.gov"); }
 
-// Non-blocking. Keeps the clock chasing a real value whenever there's a network, because
-// an unsynced clock silently suppresses ALL telemetry (the enqueue gate in loop()).
+// Non-blocking. Keeps the clock chasing a real value whenever there's a network. Logging
+// no longer depends on it, but DELIVERY does: until the anchor below is set, the backlog
+// has no absolute timestamps and stays put.
 void serviceNtp() {
   static bool wasUp = false;
   static bool announced = false;
@@ -463,11 +823,146 @@ void serviceNtp() {
   }
   wasUp = up;
 
-  if (synced && !announced) {         // announce once so the serial log shows when logging began
-    Serial.printf("NTP: clock valid (epoch=%lu) — telemetry enabled\n", (unsigned long)time(nullptr));
+  // Anchor uptime to wall-clock, once. Everything already buffered becomes datable the
+  // instant this lands — including readings taken before any network existed.
+  if (synced && g_bootEpoch == 0) {
+    g_bootEpoch = (uint32_t)time(nullptr) - uptimeSec();
+    // Persist it against this session id: if we reboot before the pre-anchor records have
+    // been delivered, the next boot can still date them (see resolveEpoch).
+    if (g_fsOk) {
+      logPrefs.putUShort("asess",  g_sess);
+      logPrefs.putUInt  ("aepoch", g_bootEpoch);
+      g_anchSess = g_sess; g_anchEpoch = g_bootEpoch;
+    }
+    Serial.printf("NTP: clock valid — session %u boot epoch=%lu, %lu buffered reading(s) now datable\n",
+                  g_sess, (unsigned long)g_bootEpoch, (unsigned long)logPendingRecords());
+  }
+
+  if (synced && !announced) {         // announce once so the serial log shows when delivery began
+    Serial.printf("NTP: clock valid (epoch=%lu) — delivery enabled\n", (unsigned long)time(nullptr));
     announced = true;
   }
   if (!synced) announced = false;     // re-announce if we ever lose it
+}
+
+// ---------- local history download (HTTP) ----------
+// A completely independent way to get the data off the box: no InfluxDB, no token, no
+// Caddy, no retention window, no internet. Park outside, share a hotspot, open
+// http://drain.local/log.csv (or the IP, which is reported in telemetry as `ip`).
+// Deliberately unauthenticated and read-only — it is reachable only by whoever is already
+// on the same LAN, and it exposes nothing but water depths.
+WebServer server(80);
+const char* MDNS_HOST = "drain";
+
+// Advertise on every fresh association: a new network means a new IP, and the old mDNS
+// registration is stale.
+void serviceMdns() {
+  static bool wasUp = false;
+  bool up = (WiFi.status() == WL_CONNECTED);
+  if (up && !wasUp) {
+    MDNS.end();
+    if (MDNS.begin(MDNS_HOST)) {
+      MDNS.addService("http", "tcp", 80);
+      Serial.printf("HTTP: http://%s.local/log.csv  (http://%s/log.csv)\n",
+                    MDNS_HOST, WiFi.localIP().toString().c_str());
+    } else {
+      Serial.printf("HTTP: mDNS failed — use http://%s/log.csv\n", WiFi.localIP().toString().c_str());
+    }
+  }
+  wasUp = up;
+}
+
+// Streams one log generation as CSV. Sent in blocks with serviceFast() in between, so a
+// multi-megabyte download can't leave the buzzer stuck on or the button unresponsive.
+void streamLogFile(int idx, uint32_t sinceEpoch) {
+  File f = LittleFS.open(LOG_PATH[idx], "r");
+  if (!f) return;
+  static Reading blk[64];
+  char line[160];
+  String out;
+  out.reserve(sizeof(blk) / LOG_RECSZ * 80);
+  while (true) {
+    int n = f.read((uint8_t*)blk, sizeof(blk)) / LOG_RECSZ;
+    if (n <= 0) break;
+    out = "";
+    for (int i = 0; i < n; i++) {
+      uint32_t ep = resolveEpoch(blk[i]);
+      if (sinceEpoch && (ep == 0 || ep < sinceEpoch)) continue;
+      char iso[24] = "";
+      if (ep) {
+        time_t tt = (time_t)ep;
+        struct tm tmv;
+        gmtime_r(&tt, &tmv);
+        strftime(iso, sizeof(iso), "%Y-%m-%dT%H:%M:%SZ", &tmv);
+      }
+      // Undatable rows are still emitted — unlike the InfluxDB path, a CSV can carry them
+      // honestly (blank epoch, uptime filled in), so the shape of an unanchored stretch of
+      // history is readable even though its position on the calendar is not.
+      unsigned long upCol = (blk[i].flags & RD_RESOLVED) ? 0UL : (unsigned long)blk[i].t;
+      // dtostrf, not "%.2f" — float conversion is compiled out of the newlib variant these
+      // builds link against, and would silently emit nothing where the depths should be.
+      char sIn[12], sRaw[12];
+      dtostrf(blk[i].in,    0, 2, sIn);
+      dtostrf(blk[i].rawCm, 0, 2, sRaw);
+      if (ep) snprintf(line, sizeof(line), "%u,%lu,%lu,%s,%s,%s,%d,%d,%d,%d\n",
+                       blk[i].sess, upCol, (unsigned long)ep, iso,
+                       sIn, sRaw, blk[i].rssi, blk[i].kept, blk[i].outWin, blk[i].noEcho);
+      else    snprintf(line, sizeof(line), "%u,%lu,,,%s,%s,%d,%d,%d,%d\n",
+                       blk[i].sess, upCol,
+                       sIn, sRaw, blk[i].rssi, blk[i].kept, blk[i].outWin, blk[i].noEcho);
+      out += line;
+    }
+    if (out.length()) server.sendContent(out);
+    serviceFast();
+  }
+  f.close();
+}
+
+void handleLogCsv() {
+  if (!g_fsOk) { server.send(503, "text/plain", "no filesystem — RAM-only fallback mode\n"); return; }
+  uint32_t since = server.hasArg("since") ? (uint32_t)strtoul(server.arg("since").c_str(), nullptr, 10) : 0;
+  logCommit();                       // include everything recorded right up to this request
+
+  server.setContentLength(CONTENT_LENGTH_UNKNOWN);   // chunked: total size is not known up front
+  server.sendHeader("Content-Disposition", "attachment; filename=\"drain-log.csv\"");
+  server.send(200, "text/csv", "");
+  server.sendContent(F("session,uptime_s,epoch,iso8601,inches,raw_cm,rssi,pings_kept,pings_outwin,pings_noecho\n"));
+  // Oldest generation first: the file we are NOT appending to was written earlier.
+  streamLogFile(1 - g_logAct, since);
+  streamLogFile(g_logAct, since);
+  server.sendContent("");            // zero-length chunk terminates the response
+}
+
+void handleRoot() {
+  char buf[1200];
+  char sLvl[12];
+  dtostrf(lastLevelIn, 0, 2, sLvl);      // see streamLogFile: "%f" is not available here
+  snprintf(buf, sizeof(buf),
+    "<!doctype html><meta name=viewport content='width=device-width,initial-scale=1'>"
+    "<style>body{font:16px system-ui;margin:2rem;max-width:34rem}"
+    "td{padding:.2rem .8rem .2rem 0}a{font-size:1.2rem}</style>"
+    "<h2>Drain Monitor</h2><table>"
+    "<tr><td>Level<td><b>%s in</b>"
+    "<tr><td>Firmware<td>v%d"
+    "<tr><td>Uptime<td>%lu s (session %u)"
+    "<tr><td>Clock<td>%s"
+    "<tr><td>Undelivered<td>%lu readings"
+    "<tr><td>Log on flash<td>%u + %u bytes"
+    "<tr><td>WiFi<td>%s (%d dBm)"
+    "</table><p><a href='/log.csv'>Download full history (CSV)</a>",
+    sLvl, FW_VERSION, (unsigned long)uptimeSec(), g_sess,
+    g_bootEpoch ? "synced" : "not yet synced",
+    (unsigned long)logPendingRecords(),
+    (unsigned)logFileSize(0), (unsigned)logFileSize(1),
+    WiFi.SSID().c_str(), (int)WiFi.RSSI());
+  server.send(200, "text/html", buf);
+}
+
+void startWebServer() {
+  server.on("/", handleRoot);
+  server.on("/log.csv", handleLogCsv);
+  server.onNotFound([]() { server.send(404, "text/plain", "try / or /log.csv\n"); });
+  server.begin();
 }
 
 // ---------- OTA (pull) ----------
@@ -584,9 +1079,13 @@ void initSelfCheck() {
     Serial.printf("SELFCHECK: fw v%d clean boot (%s)  OK\n", FW_VERSION, resetReasonStr(g_resetReason));
   }
 
-  if (g_badBoots >= (uint32_t)OTA_BAD_BOOT_LIMIT)
+  if (g_badBoots >= (uint32_t)OTA_BAD_BOOT_LIMIT) {
+    g_safeMode = true;
     Serial.printf("SELFCHECK: ** SUSPECT BUILD v%d — %lu firmware crashes since last good boot. "
                   "Reflash a known-good build over USB. **\n", FW_VERSION, (unsigned long)g_badBoots);
+    Serial.println(F("SELFCHECK: ** SAFE MODE — filesystem and web server disabled. "
+                     "Sensor, LEDs, lamp and buzzer still run; telemetry falls back to RAM. **"));
+  }
 }
 
 // Called every loop: once the firmware has run VALIDATE_STABLE_MS without crashing, mark it
@@ -621,6 +1120,8 @@ void setup() {
   Serial.println();
   Serial.println(F("St. Joes Drain Monitor — booting"));
   initSelfCheck();   // classify how we booted (clean / crash / brownout) before anything else
+  if (!g_safeMode) logInit();   // mount the persistent log BEFORE the first reading is taken
+                                // (skipped in safe mode -> g_fsOk stays false -> RAM buffering)
 
   WiFi.mode(WIFI_STA);
   connectWifiOnce();   // tries SJC guest -> hotspot -> home, in order
@@ -634,10 +1135,16 @@ void setup() {
   Serial.println();
   Serial.printf("NTP: epoch=%lu\n", (unsigned long)time(nullptr));
 
+  if (!g_safeMode) {
+    startWebServer();
+    serviceMdns();   // register immediately if WiFi came up during setup
+  }
+
   unsigned long now = millis();
   lastSampleMs = now;
   lastEnqueueMs = now - SLOW_INTERVAL_MS;
   lastSendOkMs = now;
+  lastCommitMs = now;
   // First OTA check fires ~OTA_FIRST_CHECK_MS after boot (device sends startup telemetry first),
   // then every OTA_CHECK_INTERVAL_MS.
   lastOtaCheckMs = now - OTA_CHECK_INTERVAL_MS + OTA_FIRST_CHECK_MS;
@@ -645,12 +1152,15 @@ void setup() {
 
 void loop() {
   unsigned long ms = millis();
-  serviceFast();   // alarm/button/LEDs responsive at loop rate
+  serviceFast();       // alarm/button/LEDs responsive at loop rate
+  if (!g_safeMode) server.handleClient();   // /log.csv download — cheap when nobody is connected
 
   if (ms - lastSampleMs >= SAMPLE_INTERVAL_MS) {
     lastSampleMs = ms;
     ensureWifi();
-    serviceNtp();              // re-arm the clock on reconnect — without it, telemetry stays gated off
+    serviceNtp();              // re-arm the clock on reconnect — without it, delivery stays gated off
+    if (!g_safeMode) serviceMdns();   // (re)advertise drain.local after any reassociation
+    serviceLogCommit();        // never leave a staged batch in RAM longer than LOG_COMMIT_MS
     markValidatedIfStable();   // once we've run stably, mark this firmware good (network-independent)
 
     float lvl = readLevelInches();
@@ -679,23 +1189,28 @@ void loop() {
         else { regime = "calm"; if (ms - lastEnqueueMs >= SLOW_INTERVAL_MS) doEnqueue = true; }
       }
     }
+    // No clock check here — that gate is exactly what left an offline box with nothing to
+    // send. Buffer unconditionally; absolute time is applied later, at flush.
     if (doEnqueue) {
-      uint32_t epoch = (uint32_t)time(nullptr);
-      if (epoch > (uint32_t)NTP_VALID_EPOCH) {
-        enqueue(epoch, lvl, g_rawCm, (int16_t)WiFi.RSSI(),
-                (int16_t)g_kept, (int16_t)g_outWin, (int16_t)g_noEcho);
-        lastEnqueueMs = ms;
-      }
+      enqueue(uptimeSec(), lvl, g_rawCm, (int16_t)WiFi.RSSI(),
+              (int16_t)g_kept, (int16_t)g_outWin, (int16_t)g_noEcho);
+      lastEnqueueMs = ms;
     }
 
-    Serial.printf("level=%s in  raw=%s cm  [k=%d ow=%d ne=%d]  regime=%s  buf=%d  wifi=%s  buz=%d mute=%d ack=%d\n",
+    g_pending = logPendingRecords();     // authoritative refresh, once per second
+    uint32_t pending = g_pending;
+    Serial.printf("level=%s in  raw=%s cm  [k=%d ow=%d ne=%d]  regime=%s  pend=%lu(%s)  wifi=%s  clk=%s  buz=%d mute=%d ack=%d\n",
                   isnan(lvl) ? "NaN" : String(lvl, 2).c_str(),
                   isnan(g_rawCm) ? "NaN" : String(g_rawCm, 2).c_str(),
-                  g_kept, g_outWin, g_noEcho, regime, rcount,
+                  g_kept, g_outWin, g_noEcho, regime,
+                  (unsigned long)pending, g_fsOk ? "flash" : "RAM",
                   WiFi.status() == WL_CONNECTED ? "up" : "down",
+                  g_bootEpoch ? "set" : "unset",
                   (int)beepOn, (int)muted, (int)acked);
 
-    if (WiFi.status() == WL_CONNECTED && rcount > 0) { if (flushBuffer()) lastSendOkMs = ms; }
+    // Steady state: one chunk per tick keeps up easily (we only produce 1 reading/s).
+    // A real backlog is drained by the burst path at the bottom of loop().
+    if (WiFi.status() == WL_CONNECTED && pending > 0) { if (flushChunk()) lastSendOkMs = ms; }
 
     // ----- OTA check: infrequent, ONLY when online AND the water is low (never mid-warn/alarm) -----
     // Gating on lastLevelIn < WARN_IN means a reboot-for-update can't take the alarm offline
@@ -704,10 +1219,33 @@ void loop() {
         lastLevelIn < WARN_IN &&
         ms - lastOtaCheckMs >= OTA_CHECK_INTERVAL_MS) {
       lastOtaCheckMs = ms;
+      logCommit();     // a successful update reboots without returning — don't lose staged readings
       checkForOTA();
     }
 
-    if (millis() - lastSendOkMs > WATCHDOG_MS) { Serial.println("Watchdog reboot"); delay(200); ESP.restart(); }
+    // ----- watchdog: "associated but not delivering", NOT "no network" -----
+    // Previously this rebooted after WATCHDOG_MS without a successful send, which at a
+    // site whose WiFi is usually absent meant a reboot every 30 minutes — each one wiping
+    // the very backlog store-and-forward exists to preserve. Hold the timer open unless
+    // we are actually connected AND have something to deliver; then a stalled TLS/HTTP
+    // stack is still caught, but simply being out of range is not a fault.
+    if (WiFi.status() != WL_CONNECTED || pending == 0) lastSendOkMs = ms;
+    if (ms - lastSendOkMs > WATCHDOG_MS) {
+      Serial.println("Watchdog reboot");
+      logCommit();     // the log outlives the reboot; the staging batch would not
+      delay(200);
+      ESP.restart();
+    }
+  }
+
+  // ----- backlog burst drain -----
+  // Only while the water is low, mirroring the OTA gate: back-to-back uploads block the
+  // loop for their duration, so a backfill is never allowed to compete with an active
+  // alarm. serviceFast() at the top of loop() runs between chunks either way.
+  if (WiFi.status() == WL_CONNECTED && lastLevelIn < WARN_IN &&
+      g_pending > (uint32_t)FLUSH_CHUNK) {
+    if (flushChunk()) lastSendOkMs = millis();
+    else g_pending = 0;   // stale estimate or a failing send — stop bursting until the next tick
   }
 
   delay(5);

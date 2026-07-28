@@ -59,6 +59,16 @@ usually means cutting a new release with a *higher* number containing the old co
 
 ## Notes / limitations
 
+- **The reading log lives in the `spiffs` partition, and OTA never touches it.** Only
+  the app partition is rewritten, so a firmware update keeps the stored history. Two
+  things do wipe it: a change to the partition table (don't), and a change to the
+  on-flash record layout. The latter is guarded — `struct Reading` has a
+  `static_assert` on its size and the log carries a `LOG_MAGIC` stamp, so a mismatched
+  build wipes the log deliberately at boot instead of decoding old bytes as garbage
+  depths. **If you change `struct Reading`, bump `LOG_MAGIC`.**
+- **First boot of v5 formats that partition** (it was never used before), which adds a
+  few seconds to that one boot.
+
 - **Download integrity, not boot-rollback.** The ESP32 verifies the image (size +
   checksum) before switching the boot partition, so a corrupt/truncated *download*
   can't brick the device — the current firmware keeps running. It does **not** auto-
@@ -75,6 +85,12 @@ usually means cutting a new release with a *higher* number containing the old co
   reason is also sent as the `rst` telemetry field so Grafana can annotate reboots.
   This surfaces a bad build; it still can't *auto-revert* one (that needs the rollback
   bootloader) — a confirmed-bad unit needs a USB reflash.
+- **Safe mode.** Hitting the same 3-crash threshold also disables the subsystems that
+  aren't needed to warn anybody: the filesystem and the web server. The sensor, LED
+  bar, overflow lamp and buzzer keep running, and telemetry falls back to the RAM
+  buffer. It is not a rollback — the unit still needs a USB reflash — but a bad build
+  degrades into a working drain alarm instead of a dead box, which matters because
+  recovery requires physically visiting the site.
 - **TLS is encrypt-only** (`setInsecure()`), matching the telemetry path. Fine for a
   public binary; if you later want MITM protection, pin GitHub's root CA or add a
   SHA-256 check to the manifest.

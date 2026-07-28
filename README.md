@@ -9,6 +9,29 @@ dashboard. The box is a self-contained alarm first, a cloud sensor second.
 See [PROJECT.md](PROJECT.md) for the full design history (sensing approaches tried,
 mechanical build, calibration).
 
+## Getting the data off the box
+
+The site has no dependable WiFi, so the firmware assumes it is usually offline and
+logs regardless:
+
+- **Store and forward.** Readings go to a persistent log in flash (LittleFS, two
+  rotating files, ~37,000 readings ≈ 12 h of continuous 1 Hz logging or ~8 months of
+  calm heartbeats). It survives reboots, brownouts and power cuts. When a network
+  appears, the backlog is uploaded oldest-first in bounded chunks and back-dated to
+  when it was actually measured, so Grafana fills in the past with no dashboard
+  changes.
+- **Local download.** The device also serves its own history over plain HTTP on the
+  LAN — park next to it, turn on a phone hotspot, and open
+  **`http://drain.local/log.csv`** (or `http://<ip>/log.csv`; the IP is reported in
+  telemetry as the `ip` field). This path needs no InfluxDB, no token, no retention
+  window and no internet.
+
+Readings are stamped with **uptime**, not wall-clock, so logging never depends on the
+device having had a clock; absolute time is applied on the way out once NTP lands.
+Readings taken during a boot that never reached NTP keep their shape in the CSV
+(uptime column) but are deliberately **not** sent to InfluxDB — a guessed timestamp
+would corrupt the dashboard. A battery-backed RTC (DS3231) would close that gap.
+
 ## Repository layout
 
 | Path | What it is |
