@@ -55,6 +55,14 @@ cp secrets.example.h secrets.h
 `secrets.h` provides `WIFI_NETS[]`, `N_WIFI`, and `INFLUX_TOKEN`. Use a **write-only,
 bucket-scoped** InfluxDB token — that token is embedded in the compiled binary.
 
+## Field visits
+
+The unit is offline except when someone is standing next to it with a phone hotspot, so
+an update and its first test happen on the same trip.
+**[firmware/docs/field-visit-checklist.md](firmware/docs/field-visit-checklist.md)** is
+the pre-flight for that: what to bring, what should happen, what to verify before
+leaving, and how to read the serial log if it doesn't.
+
 ## Over-the-air updates
 
 The field firmware self-updates over the internet — the device polls a manifest and
