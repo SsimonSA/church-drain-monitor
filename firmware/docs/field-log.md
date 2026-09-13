@@ -3,6 +3,31 @@
 Running record of site visits and deployment state. Newest entry at the top.
 Add an entry for every visit and every release, even if the outcome is unknown.
 
+## 2026-09-13 — hotspot drive-by, backlog stops at 09-01
+
+- Hotspot on outside the kitchen. The unit connected and delivered its backlog, but only
+  from Sun 08-30 11:45 through Tue 09-01 12:12 EDT (598 readings, hotspot IP 10.73.185.210,
+  a different address from the 08-30 flush, so this was today's delivery). Nothing newer
+  arrived, and no live readings from today either.
+- One real event in that window: Tue 09-01 08:57:22 to 08:57:30, a 9-second excursion
+  peaking at 4.82" (raw jumped, slew limiter ramped 1.5, 3.0, 4.5, 4.82, back down).
+  Enough to trip the 4.5" fast chirp for a few seconds. Then the 1 Hz settle window and a
+  return to calm 10-minute heartbeats until 12:12.
+- **Diagnosis (from the firmware, not yet confirmed on the device):** the unit rebooted
+  around 12:15 on 09-01 (today's rows carry rst=1, a clean power-on). The new boot had no
+  NTP until today. On connect, flushChunk() runs before NTP lands, dates the old session's
+  records via the saved anchor, but treats the new session's own pre-NTP records as
+  undatable and advances the delivery cursor past them. Seconds later NTP arrives, too late.
+  Twelve days of readings are still on flash and are now datable for `/log.csv`, but the
+  InfluxDB path has skipped them for good.
+- No live point from today because calm mode enqueues only every 10 min and the visit was
+  shorter than that.
+- **Next visit:** stay on the hotspot 10+ min, download `http://<ip>/log.csv` (the ip field
+  shows the address), and read the serial boot line `LOG: mounted — session=N` to confirm
+  the session count went up. Ask whether anyone unplugged the box around noon on 09-01.
+- **v6 fix:** in flushChunk(), when g_bootEpoch is still 0, stop the chunk at the first
+  record from the current session instead of skipping it, so the backlog waits for NTP.
+
 ## 2026-09-13 — status check (no visit)
 
 - Reconstructed state from the repo on the desktop laptop. No record of the 2026-08-27
