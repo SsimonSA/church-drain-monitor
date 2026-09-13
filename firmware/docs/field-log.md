@@ -3,14 +3,14 @@
 Running record of site visits and deployment state. Newest entry at the top.
 Add an entry for every visit and every release, even if the outcome is unknown.
 
-## 2026-09-13 — firmware v6 built (flush-before-NTP fix), release pending
+## 2026-09-13 — firmware v6 released (flush-before-NTP fix)
 
 - flushChunk() now stops at the first record from the current boot while NTP is still
   pending, so a reboot no longer discards its own backlog from the InfluxDB path.
 - Sensing, thresholds and the on-flash record format are unchanged; the stored log
   survives the update.
-- Built and committed. **Release fw-v6 and the manifest flip still to do** (see
-  `ota/README.md`); until the manifest says 6 the unit stays on v5.
+- Release fw-v6 published and the manifest flipped. Lands on the next visit: stay on the
+  hotspot 10+ min, expect the OTA reboot within a minute or two, confirm fw=6 in Grafana.
 - Also dropped the unjoinable `SJC Parish Guest` entry from `secrets.h` (5 GHz only) so
   the unit stops burning a 10 s timeout on it each scan cycle. Baked into the v6 binary.
 - The readings from 09-01 to 09-13 are still only on the device. Pull `/log.csv` on the
