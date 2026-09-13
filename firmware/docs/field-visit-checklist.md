@@ -1,5 +1,8 @@
 # Field visit checklist — first v5 install
 
+> **Done.** v5 was installed over the air on 2026-08-27 and validated on 2026-08-30. See
+> `field-log.md`. This checklist is kept as the template for the next firmware visit.
+
 **State as of 2026-07-28:** firmware **v5 is published and waiting**. The manifest points
 at it, the binary is up, but *no device has ever run it*. The field unit is still on
 **v3** and will stay there until someone stands next to it with a hotspot.

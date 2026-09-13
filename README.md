@@ -40,6 +40,8 @@ would corrupt the dashboard. A battery-backed RTC (DS3231) would close that gap.
 | `experiments/BenchTest/` | Interactive bench harness — exercise LEDs / buzzer / sensor / WiFi / InfluxDB write from a serial menu. |
 | `experiments/BtnLedTest/` | Minimal button + LED sanity sketch. |
 | `experiments/vl53l1x-abandoned/` | Abandoned VL53L1X ToF version (kept for reference). |
+| `experiments/ultrasonic-original-2025/` | The very first sketch (bare HC-SR04, six LEDs), archived from the old sketchbook. |
+| `hardware/3d-models/` | Copies of the printable parts (float, tube liner, sensor cap). |
 
 ## Setup — credentials
 
