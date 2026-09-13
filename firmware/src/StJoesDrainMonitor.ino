@@ -95,7 +95,7 @@ const char* DEVICE_TAG = "drain-1";
 //
 // >>> BUMP FW_VERSION ON EVERY RELEASE. The manifest's version must EXCEED this to
 //     trigger an update; equal or lower is a no-op, which is what stops reflash loops.
-const int FW_VERSION = 5;
+const int FW_VERSION = 6;
 const char* OTA_MANIFEST_URL =
     "https://raw.githubusercontent.com/SsimonSA/church-drain-monitor/main/firmware/ota/manifest.txt";
 const unsigned long OTA_CHECK_INTERVAL_MS = 6UL * 3600UL * 1000UL;  // re-check every 6 h
@@ -679,6 +679,19 @@ bool flushChunk() {
     memcpy(batch, rbuf, (size_t)n * sizeof(Reading));
   }
   if (n == 0) return false;
+
+  // This boot's own records cannot be dated until its NTP sync lands (g_bootEpoch), and
+  // that usually happens a few seconds AFTER the link comes up — after this function has
+  // already started draining on the previous session's anchor. Treating them as undatable
+  // below would advance the cursor past them for good: that is exactly how twelve days of
+  // readings were lost on 2026-09-13. The log is chronological, so this session's records
+  // are always the tail of the batch — deliver everything older and stop there.
+  if (g_bootEpoch == 0) {
+    int cut = 0;
+    while (cut < n && batch[cut].sess != g_sess) cut++;
+    if (cut == 0) return false;       // only our own pre-anchor records left: wait for NTP
+    n = cut;
+  }
 
   // SSID of the link carrying this batch, as a line-protocol string field. A field (not a
   // tag) keeps series cardinality fixed, and spaces need no escaping inside the quotes.
