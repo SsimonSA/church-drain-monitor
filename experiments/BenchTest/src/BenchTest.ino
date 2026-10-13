@@ -59,7 +59,7 @@ const float ZERO_OFFSET_IN = 1.27f;   // 0.42 -> 0.84 (tube shortened) -> 1.27 (
 const unsigned long WIFI_ATTEMPT_MS = 10000UL;
 const char* INFLUX_WRITE_URL =
     "https://stjoesdrain.eastus.cloudapp.azure.com/api/v2/write?org=stjoes&bucket=drain&precision=s";
-const char* DEVICE_TAG = "drain-1";
+const char* DEVICE_TAG = "bench";   // keep bench test points off the field unit's dashboard series
 
 const int LED_PINS[5] = { PIN_LED_LG, PIN_LED_HG, PIN_LED_LY, PIN_LED_HY, PIN_LED_LR };
 const char* LED_NAMES[5] = { "LG green", "HG green", "LY yellow", "HY yellow", "LR red" };

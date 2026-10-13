@@ -3,6 +3,23 @@
 Running record of site visits and deployment state. Newest entry at the top.
 Add an entry for every visit and every release, even if the outcome is unknown.
 
+## 2026-10-13 — WiFi bridge bench-tested, v7 built
+
+- Bridge plan: a TP-Link RE315 dual-band extender joins the church's 5 GHz-only guest
+  network and broadcasts a 2.4 GHz network named `DrainMonitor` for the unit. (An RE105
+  bought 09-29 was 2.4 GHz only and could not do this; returned.)
+- Bench test at home: RE315 extending the 5 GHz band only, `DrainMonitor` on 2.4 GHz.
+  Bench ESP32 running experiments/BenchTest joined it (IP 192.168.68.201, RSSI -45) and
+  wrote to InfluxDB, HTTP 204. End-to-end TLS through the bridge works.
+- BenchTest now tags its test point `bench` instead of `drain-1` so it stays off the
+  dashboard series.
+- `DrainMonitor` added first in both secrets files; hotspot remains the fallback.
+- **v7 built** (same code as v6 plus the new credentials). Release and manifest flip
+  pending; v6 as published does not know the extender network.
+- **Still to verify on site:** captive portal or client isolation on the guest network,
+  NTP (UDP 123) passing through, and signal at the kitchen. Test with a phone on
+  `DrainMonitor` before mounting the extender.
+
 ## 2026-09-13 — firmware v6 released (flush-before-NTP fix)
 
 - flushChunk() now stops at the first record from the current boot while NTP is still
