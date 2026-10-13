@@ -3,6 +3,27 @@
 Running record of site visits and deployment state. Newest entry at the top.
 Add an entry for every visit and every release, even if the outcome is unknown.
 
+## 2026-10-10/11 — weekend hotspot drive-by (reported 10-13)
+
+- A new block arrived in InfluxDB: Thu 09-03 07:56 through Mon 09-07 16:50 EDT, 630
+  readings at the calm 10-min cadence, all dry, delivered via a new hotspot IP
+  (10.205.127.210). Nothing newer than 09-07 has arrived, and nothing from 09-01 12:12 to
+  09-03 07:56.
+- Every delivered row is stamped fw=5: **the unit did not update to v7.** The OTA needs
+  about two minutes on the hotspot after association; a visit shorter than that aborts
+  the download and the check does not retry for 6 h.
+- No live readings from the visit (rssi=0 on every row), so it was shorter than one
+  10-min calm heartbeat.
+- The block boundaries (09-01 12:12, 09-03 07:56, 09-07 16:50) all look like power
+  interruptions: each new block starts and ends at an odd time with rst=1 (power-on).
+  Suspect the outlet is being used or unplugged by kitchen staff.
+- Why exactly this block became deliverable on this visit and not on 09-13 is not fully
+  explained from the data; `/log.csv` and the serial `LOG: mounted — session=N` line
+  on the next visit will settle it.
+- **Next visit:** stay on the hotspot at least 10 min and watch Grafana for fw to flip to
+  7. If it does not within 3 min, power-cycle the unit (the OTA check fires 60 s after
+  boot). Pull `/log.csv` before that. Look at where the unit is plugged in.
+
 ## 2026-10-13 — WiFi bridge bench-tested, v7 built
 
 - Bridge plan: a TP-Link RE315 dual-band extender joins the church's 5 GHz-only guest
