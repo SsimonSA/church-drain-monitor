@@ -14,8 +14,8 @@ Add an entry for every visit and every release, even if the outcome is unknown.
 - BenchTest now tags its test point `bench` instead of `drain-1` so it stays off the
   dashboard series.
 - `DrainMonitor` added first in both secrets files; hotspot remains the fallback.
-- **v7 built** (same code as v6 plus the new credentials). Release and manifest flip
-  pending; v6 as published does not know the extender network.
+- **v7 released** (same code as v6 plus the new credentials) and the manifest flipped
+  to 7. The unit goes v5 to v7 directly on the next visit; v6 is skipped.
 - **Still to verify on site:** captive portal or client isolation on the guest network,
   NTP (UDP 123) passing through, and signal at the kitchen. Test with a phone on
   `DrainMonitor` before mounting the extender.
