@@ -3,6 +3,45 @@
 Running record of site visits and deployment state. Newest entry at the top.
 Add an entry for every visit and every release, even if the outcome is unknown.
 
+## 2026-10-22 — fw v10: the alarm dwell was wrong, reverted before it ever shipped
+
+- **v9's 45 s alarm dwell is removed. The buzzer fires the instant the level crosses
+  5.0 in, as in v8 and earlier.** The manifest points at v10; v9 should not be deployed.
+- The unit never ran v9 — it was still on v7 when this was caught, so the dwell never
+  reached hardware.
+- **Why the dwell was wrong:** it was reasoned from telemetry alone (discharges clear in
+  ~10 s, so filter on persistence rather than peak). The missing fact is physical —
+  **a partially clogged drain can go from normal to overflowing in about 20 seconds**, so
+  any dwell long enough to filter a sink discharge is long enough for the floor to be wet
+  first. Alarm latency must be zero; the box exists to give the person at the sink
+  maximum warning. A false alarm about once a fortnight is the accepted price.
+- If nuisance alarms ever need addressing: change the **threshold** or the **ack
+  behaviour**, never the latency. The source now carries a prominent
+  DO-NOT-ADD-A-DWELL block with this rationale, because the v9 conclusion is easy to
+  re-derive from the data and wrong every time.
+- Retained from v8/v9: `DEADBAND_IN` 1.8 in, hourly OTA checks, 10 min retry after a
+  failed check.
+
+## 2026-10-22 — fw v8 and v9 released the same evening
+
+- **v8:** `DEADBAND_IN` 1.4 → 1.8 in, so an empty drain reads a flat 0.00 instead of
+  flickering 0.00/1.42 after the remount. Thresholds untouched.
+- **v9 (what the unit actually takes — v8 is superseded and skipped):**
+  - **`ALARM_DWELL_MS = 45 s`.** The level must hold at/above 5.0 in for 45 s before the
+    latching beep-until-ack starts, because routine sink use was latching the 95 dB
+    alarm. LED bar, red lamp and the escalating chirps stay instantaneous, and the buzzer
+    holds at the WARN2 fast chirp during the dwell. Only dropping below `ALARM_CLEAR_IN`
+    (4.8 in) cancels the dwell, so a level oscillating around 5.00 during a real backup
+    cannot restart it forever.
+  - **OTA cadence 6 h → 1 h**, now that the bridge keeps the unit online.
+  - **A failed OTA check retries in 10 min** instead of burning the window.
+    `checkForOTA()` returns success and the next attempt is scheduled from the outcome;
+    "already up to date" counts as success. Previously one dropped connection cost 6 h
+    and the only recovery was a power cycle, which defeats remote updating.
+- Releases `fw-v8` and `fw-v9` published, assets verified HTTP 200, manifest says 9.
+- **This was the first OTA ever attempted over the bridge rather than a phone hotspot**,
+  and the first remote-capable firmware the project has had.
+
 ## 2026-10-22 — site visit: remote monitoring achieved; the sensor was never broken
 
 - **The bridge works. No captive portal.** A phone joined to `DrainMonitor` loaded

@@ -95,7 +95,7 @@ const char* DEVICE_TAG = "drain-1";
 //
 // >>> BUMP FW_VERSION ON EVERY RELEASE. The manifest's version must EXCEED this to
 //     trigger an update; equal or lower is a no-op, which is what stops reflash loops.
-const int FW_VERSION = 9;
+const int FW_VERSION = 10;
 const char* OTA_MANIFEST_URL =
     "https://raw.githubusercontent.com/SsimonSA/church-drain-monitor/main/firmware/ota/manifest.txt";
 // Cadence was 6 h, chosen when the unit was offline except during a site visit. Since
@@ -170,16 +170,25 @@ const float WARN_IN        = 4.0f;   // pre-overflow tier 1: slow chirp
 const float WARN2_IN       = 4.5f;   // pre-overflow tier 2: faster chirp (escalating)
 const float ALARM_IN       = 5.0f;   // urgent: full beep-until-acknowledged
 const float ALARM_CLEAR_IN = 4.8f;   // hysteresis: re-arm the ack below this
-// How long the level must STAY at/above ALARM_IN before the latching beep-until-ack
-// starts. Added 2026-10-22: a sink-overflow test peaked at 5.40" and cleared in ~10 s,
-// and the three "events" in the preceding fortnight have the identical ~9 s shape — so
-// routine kitchen water use was latching the 95 dB alarm until somebody walked over and
-// silenced it. The discriminator between normal use and a real backup is persistence,
-// not peak: a discharge clears in seconds, a blockage stays up for minutes.
-// The LED bar, the red lamp and the escalating chirps all stay INSTANTANEOUS — only the
-// latching beep waits. While the dwell runs the buzzer holds at the WARN2 fast chirp, so
-// a real event still escalates audibly from the first second.
-const unsigned long ALARM_DWELL_MS = 45000UL;   // 45 s at/above ALARM before the beep latches
+// ---------------------------------------------------------------------------
+// THE ALARM IS DELIBERATELY INSTANTANEOUS. DO NOT ADD A DWELL / DEBOUNCE HERE.
+//
+// A 45 s dwell was added in v9 and removed again in v10 the same evening. The reasoning
+// for it looked sound from the data alone: a sink-overflow test peaked at 5.40" and
+// cleared in ~10 s, the three events logged in the preceding fortnight have the same
+// ~9 s shape, and one of them had latched the 95 dB alarm until somebody silenced it by
+// hand. "Persistence, not peak" is a tempting rule.
+//
+// It is wrong here, and the reason is physical, not statistical: **a partially clogged
+// drain can go from normal to overflowing in about 20 seconds.** Any dwell long enough
+// to filter out a sink discharge is also long enough for the floor to be wet before the
+// buzzer sounds. The whole point of the box is to give the person at the sink the
+// maximum possible warning, so the alarm fires the instant the level crosses ALARM_IN.
+//
+// A false alarm roughly once a fortnight is the accepted price. If nuisance alarms ever
+// need addressing, change the THRESHOLD or the ack behaviour — never the latency.
+// (Stephen, on site, 2026-10-22.)
+// ---------------------------------------------------------------------------
 
 // Overflow lamp runs on the ESP32 LEDC (hardware PWM), so its blink is timer-generated and
 // stays perfectly even even while the loop is busy (network upload / ping burst block it).
@@ -438,18 +447,9 @@ void serviceAlarm() {
   unsigned long now = millis();
   if (L < ALARM_CLEAR_IN) acked = false;            // re-arm once it drops below alarm
 
-  // Dwell timer: starts when the level first reaches ALARM_IN, and is only cancelled by
-  // dropping below ALARM_CLEAR_IN — the same hysteresis the ack uses. Resetting at
-  // ALARM_IN instead would let a level oscillating either side of 5.00" during a genuine
-  // backup restart the timer indefinitely and never latch.
-  static unsigned long alarmSinceMs = 0;
-  if (L >= ALARM_IN) { if (alarmSinceMs == 0) alarmSinceMs = now; }
-  else if (L < ALARM_CLEAR_IN) alarmSinceMs = 0;
-  bool alarmHeld = (alarmSinceMs != 0) && (now - alarmSinceMs >= ALARM_DWELL_MS);
-
   int mode = 0;                                     // 0=off 1=warn 2=warn-fast 3=alarm
   if (!muted) {
-    if (L >= ALARM_IN && !acked)             mode = alarmHeld ? 3 : 2;  // chirp fast until the dwell is satisfied
+    if (L >= ALARM_IN && !acked)             mode = 3;   // immediate — see ALARM_IN notes
     else if (L >= WARN2_IN && L < ALARM_IN)  mode = 2;
     else if (L >= WARN_IN  && L < WARN2_IN)  mode = 1;
   }
