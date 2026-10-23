@@ -22,6 +22,20 @@ Add an entry for every visit and every release, even if the outcome is unknown.
 - Retained from v8/v9: `DEADBAND_IN` 1.8 in, hourly OTA checks, 10 min retry after a
   failed check.
 
+**v10 landed over the air at 21:06 EDT — the first OTA this project has done without
+someone on site with a hotspot.** Power-on → boot as session 11 on v7 → OTA check at
+60 s → ~1 MB TLS download over the church guest network in about 20 s → reboot into v10
+as session 12. Roughly 90 s end to end. Verified after: `Firmware v10`, `Clock synced`,
+`Undelivered 0`, `DrainMonitor -45 dBm`, and **14 consecutive level samples over 80 s all
+reading exactly 0.00** — the widened deadband gives the flat idle baseline it was meant
+to.
+
+**Gotcha worth remembering: `raw.githubusercontent.com` serves a cached manifest.** After
+pushing the v10 manifest, `main` was correct via the API while raw still returned `9` for
+several minutes. A reboot in that window would have installed the superseded build. Flip
+the manifest, then confirm **with a plain fetch** (no cache-busting headers — that is
+what the ESP32 sends) before power-cycling. It cleared about 4 minutes after the push.
+
 ## 2026-10-22 — fw v8 and v9 released the same evening
 
 - **v8:** `DEADBAND_IN` 1.4 → 1.8 in, so an empty drain reads a flat 0.00 instead of
