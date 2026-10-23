@@ -3,6 +3,94 @@
 Running record of site visits and deployment state. Newest entry at the top.
 Add an entry for every visit and every release, even if the outcome is unknown.
 
+## 2026-10-22 — site visit: remote monitoring achieved; the sensor was never broken
+
+- **The bridge works. No captive portal.** A phone joined to `DrainMonitor` loaded
+  `http://neverssl.com` through to the real site (it reached neverssl's own random
+  subdomain, so DNS and outbound HTTP both left the building). This closes the question
+  that has been open since 08-30: a 2.4 GHz network with real internet now exists at the
+  kitchen.
+- On first power-up the RE315 still carried the bench config — Tether showed
+  **Main Network: No Connection**, so `DrainMonitor` was broadcasting with no uplink and
+  the phone reported "connected without internet". Re-paired Main Network to
+  `SJC Parish Guest` (open, 5 GHz).
+- **Extended-network security had to be set explicitly.** It was on "Same as main
+  network", and the guest net has no password, so `DrainMonitor` would have come up
+  **open** — and the ESP32 presents a password, which fails against an open AP. Now set
+  to WPA/WPA2-Personal with `4109771567`, matching `secrets.h`. 2.4 GHz extended on,
+  5 GHz extended off. Anyone re-running the setup wizard must re-check this.
+- Extender left plugged in and running.
+- **v7 flashed over USB on site** (clean build, 80.7% flash / 32.0% RAM, hash verified).
+  The unit then joined `DrainMonitor` by itself, **NTP synced through the church guest
+  network** (`Clock: synced`), and InfluxDB delivery went to `Undelivered 0`. The whole
+  transport chain is now verified end to end with the real hardware. `OTA: running v7,
+  manifest v7 — up to date` also confirms the OTA path works over the bridge.
+- The v6/v7 flush fix behaved as designed on first boot: ~6,000 records from the
+  unanchored previous session were reported `kept for /log.csv, not sent` rather than
+  being silently skipped.
+- Signal on the bench table was -80 dBm, then -71 dBm after moving it. **Not yet measured
+  at the mount point** — check `http://drain.local/` after remounting.
+
+### The sensor was never broken
+
+- Suspected failed; it is not. Every reading through every symptom showed
+  `k=21 ow=0 ne=0` — 21 of 21 pings kept, zero rejects, zero no-echo. A failing SR04
+  cannot produce that. Ceiling test: `ow=21 ne=0`, i.e. all pings returned, all beyond
+  the 30 cm window. It was correctly ranging whatever was in front of it.
+- `/log.csv` (13,835 records back to 2026-08-27) shows session 4 running 10-11 through
+  22:00 UTC on 10-22 with a mean raw of 25.09 cm — normal and empty the entire time. The
+  phantom values begin at **21:54 UTC (17:54 local)**, the minute the probe was first
+  handled, and track the handling: 17.5 cm being moved, 7.64 cm on the table, 23.76 cm
+  reassembled.
+- **Three real water events** in 11 days, each a clean rise and fall over ~9 s with
+  perfect ping quality: 10-14 17:33 UTC peak **6.02 in** (past the 5.5" overflow line —
+  this is what left the alarm acknowledged), 10-19 14:30 peak 3.64 in, 10-22 13:14 peak
+  4.02 in. A nine-second slug of water, not a blocked drain — a mop bucket emptied into
+  the floor drain fits the shape.
+### What those events actually are (resolved later the same evening)
+
+- A deliberate sink-overflow test at 00:41 UTC produced **exactly the same signature**:
+  3.71 → 4.26 (WARN) → 4.82 (WARN2) → 5.21 (ALARM) → peak 5.40 in, cleared in ~10 s, all
+  with `k=21 ow=0 ne=0`. All three tiers fired in order, as designed.
+- **So the three "events" above are routine kitchen water use, not incidents.** Running a
+  sink or filling a pot pushes the drain past 5" for a few seconds. The drain handled
+  every one of them.
+- **This inverts the alerting rule.** An earlier note in this entry said to alert on
+  `max()` over the window; that is wrong and would page on every pot of water. The
+  discriminator is not magnitude but **persistence** — a discharge clears in ~10 s, a real
+  backup stays up for minutes. Alert on a **sustained** condition (level above threshold
+  continuously for 2–5 min).
+- **The on-device buzzer has the same flaw.** The alarm tier is evaluated instantaneously
+  with no dwell, so normal kitchen use sounds 95 dB. That is almost certainly why the
+  alarm was found acknowledged on arrival, and a box that cries wolf is a box that gets
+  unplugged — which may well explain the 25 days of missing power. **Highest-value v8
+  change: a 30–60 s dwell above ALARM before the buzzer sounds, LED bar left
+  instantaneous.**
+
+### Other findings
+
+- **The unit was unpowered for roughly 25 of the last 56 days** — session gaps
+  09-13→09-27 and 09-30→10-11 with no records at all. This, not WiFi, is now the main
+  threat to remote monitoring. The RE315 is on a church outlet too and has the same
+  exposure. Sessions 2 and 3 carry absolute timestamps that cannot be reconciled with a
+  cold start; treat their absolute dates as unverified (session 4 is solidly anchored and
+  holds all the events above).
+- Laptop on `SJC Parish Guest` resolved `drain.local` on the extender's side, so the
+  guest network has **no client isolation**.
+- **Synthetic data warning:** the float was moved by hand on the bench from about
+  2026-10-23 00:16 UTC while the unit was online and delivering. Those points are in
+  InfluxDB as `drain-1` and cannot be deleted with the current append-only token. Ignore
+  that window.
+- `ReadExisting()` in a serial poll loop produced 8,500 duplicate fragments around 59 real
+  lines. Read raw bytes gated on `BytesToRead` instead.
+
+- **Still open:** measure RSSI at the mount point; confirm it reads 25–26 cm empty after
+  remounting with the disturbed float/liner; find an outlet that does not get unplugged;
+  **build the Grafana alert rule and notification channel** — there is remote data but
+  still no remote alerting. Lower priority: `DIST_MIN_CM` was lowered 10→7 and a 5.5"
+  overflow is raw ≈13.6 cm, so the floor could go back to 10 with margin and gate out
+  near-field artifacts.
+
 ## 2026-10-10/11 — weekend hotspot drive-by (reported 10-13)
 
 - A new block arrived in InfluxDB: Thu 09-03 07:56 through Mon 09-07 16:50 EDT, 630

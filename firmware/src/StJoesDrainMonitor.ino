@@ -95,7 +95,7 @@ const char* DEVICE_TAG = "drain-1";
 //
 // >>> BUMP FW_VERSION ON EVERY RELEASE. The manifest's version must EXCEED this to
 //     trigger an update; equal or lower is a no-op, which is what stops reflash loops.
-const int FW_VERSION = 7;
+const int FW_VERSION = 8;
 const char* OTA_MANIFEST_URL =
     "https://raw.githubusercontent.com/SsimonSA/church-drain-monitor/main/firmware/ota/manifest.txt";
 const unsigned long OTA_CHECK_INTERVAL_MS = 6UL * 3600UL * 1000UL;  // re-check every 6 h
@@ -122,8 +122,12 @@ const float US_PER_CM = 58.0f;
 // To recalibrate: refit these two numbers from fresh (raw_cm, inches) pairs.
 const float CAL_SLOPE     = -0.4468f;   // inches per cm (raw shrinks as water rises)
 const float CAL_INTERCEPT = 11.57f;     // inches at raw_cm = 0
-const float DEADBAND_IN   = 1.4f;       // empty -> clamp to 0.00. Generous: float rest wanders up to ~1.0",
-                                        // so 1.4 keeps the 2nd green dark at empty (HG then lights at ~1.4" real).
+const float DEADBAND_IN   = 1.8f;       // empty -> clamp to 0.00. Generous: float rest wanders up to ~1.0",
+                                        // so this keeps the 2nd green dark at empty (HG then lights at the band edge).
+                                        // Raised 1.4 -> 1.8 on 2026-10-22: after the probe was remounted the dry
+                                        // resting distance settled at raw 22.7-23.1 cm, which computes to 1.25-1.42"
+                                        // — straddling the old 1.4 clamp, so an empty drain flickered 0.00/1.42 and
+                                        // the idle series was never flat. Still far below WARN (4.0").
 
 // ====== ROBUSTNESS (validated on the bench) ======
 // #1 PLAUSIBILITY GATE — the float echo must land in this one-way distance band;
