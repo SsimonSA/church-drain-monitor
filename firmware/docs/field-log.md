@@ -3,6 +3,38 @@
 Running record of site visits and deployment state. Newest entry at the top.
 Add an entry for every visit and every release, even if the outcome is unknown.
 
+## 2026-10-22 — live overflow test on v10 proves the dwell would have been silent
+
+Both taps at full blast; the drain cannot keep up. Full 1 Hz trace, every sample
+`k=21 ow=0 ne=0`:
+
+```
+01:11:21  in=3.44  raw=18.21
+01:11:23  in=4.07  <- WARN
+01:11:29  in=4.50  <- WARN2
+01:11:34  in=5.61  <- ALARM
+01:11:42  in=5.92  <- peak, above the 5.5" physical overflow line
+01:11:50  in=5.03
+01:11:52  in=4.20  <- back below the 4.8" re-arm point
+01:12:11  in=0.00
+```
+
+- **WARN to ALARM in 11 s. Normal to past the overflow line in 21 s.** This is the
+  measured confirmation of the ~20 s figure that killed the v9 dwell.
+- **v9's 45 s dwell would not have fired at all.** The level was at/above 5.0" from
+  01:11:34 to 01:11:50 and dropped below the 4.8" cancel point at 01:11:52 — 18 s, so
+  the dwell timer would have been cancelled, never satisfied. Not a late alarm: **no
+  alarm**, through an event that peaked above the overflow line. See the
+  DO-NOT-ADD-A-DWELL block next to `ALARM_IN`.
+- **Sensor quality is flawless under the hardest conditions** — 21 of 21 pings kept on
+  every sample of a fast-rising water column, down to raw 12.64 cm. The remount is good.
+- **New observation: the sample interval stretched to ~2.5 s during the event**, not the
+  nominal 1 s, because each active-regime tick now also does a blocking InfluxDB POST
+  while online. Harmless at this hazard speed, but it costs resolution during exactly
+  the moments that matter. Worth revisiting if finer event detail is ever wanted.
+- The drain clears quickly once the taps are off: 5.03 → 0.00 in about 21 s. It is not
+  blocked; it simply cannot match two taps at full flow.
+
 ## 2026-10-22 — fw v10: the alarm dwell was wrong, reverted before it ever shipped
 
 - **v9's 45 s alarm dwell is removed. The buzzer fires the instant the level crosses
