@@ -95,10 +95,17 @@ const char* DEVICE_TAG = "drain-1";
 //
 // >>> BUMP FW_VERSION ON EVERY RELEASE. The manifest's version must EXCEED this to
 //     trigger an update; equal or lower is a no-op, which is what stops reflash loops.
-const int FW_VERSION = 8;
+const int FW_VERSION = 9;
 const char* OTA_MANIFEST_URL =
     "https://raw.githubusercontent.com/SsimonSA/church-drain-monitor/main/firmware/ota/manifest.txt";
-const unsigned long OTA_CHECK_INTERVAL_MS = 6UL * 3600UL * 1000UL;  // re-check every 6 h
+// Cadence was 6 h, chosen when the unit was offline except during a site visit. Since
+// 2026-10-22 it is permanently online through the RE315 bridge, so a check is one small
+// HTTPS GET on a link that is always up: 1 h makes a published release land the same
+// morning instead of the same day. A FAILED check retries on OTA_RETRY_MS rather than
+// burning the whole window — previously one hiccup mid-download cost 6 h and the only
+// practical recovery was a power cycle, which defeats remote updating.
+const unsigned long OTA_CHECK_INTERVAL_MS = 1UL * 3600UL * 1000UL;  // re-check every 1 h
+const unsigned long OTA_RETRY_MS          = 600000UL;              // after a failed check, retry in 10 min
 const unsigned long OTA_FIRST_CHECK_MS    = 60000UL;               // first check ~1 min after boot
                                                                    // (long enough to send startup telemetry first)
 
@@ -163,6 +170,16 @@ const float WARN_IN        = 4.0f;   // pre-overflow tier 1: slow chirp
 const float WARN2_IN       = 4.5f;   // pre-overflow tier 2: faster chirp (escalating)
 const float ALARM_IN       = 5.0f;   // urgent: full beep-until-acknowledged
 const float ALARM_CLEAR_IN = 4.8f;   // hysteresis: re-arm the ack below this
+// How long the level must STAY at/above ALARM_IN before the latching beep-until-ack
+// starts. Added 2026-10-22: a sink-overflow test peaked at 5.40" and cleared in ~10 s,
+// and the three "events" in the preceding fortnight have the identical ~9 s shape — so
+// routine kitchen water use was latching the 95 dB alarm until somebody walked over and
+// silenced it. The discriminator between normal use and a real backup is persistence,
+// not peak: a discharge clears in seconds, a blockage stays up for minutes.
+// The LED bar, the red lamp and the escalating chirps all stay INSTANTANEOUS — only the
+// latching beep waits. While the dwell runs the buzzer holds at the WARN2 fast chirp, so
+// a real event still escalates audibly from the first second.
+const unsigned long ALARM_DWELL_MS = 45000UL;   // 45 s at/above ALARM before the beep latches
 
 // Overflow lamp runs on the ESP32 LEDC (hardware PWM), so its blink is timer-generated and
 // stays perfectly even even while the loop is busy (network upload / ping burst block it).
@@ -421,9 +438,18 @@ void serviceAlarm() {
   unsigned long now = millis();
   if (L < ALARM_CLEAR_IN) acked = false;            // re-arm once it drops below alarm
 
+  // Dwell timer: starts when the level first reaches ALARM_IN, and is only cancelled by
+  // dropping below ALARM_CLEAR_IN — the same hysteresis the ack uses. Resetting at
+  // ALARM_IN instead would let a level oscillating either side of 5.00" during a genuine
+  // backup restart the timer indefinitely and never latch.
+  static unsigned long alarmSinceMs = 0;
+  if (L >= ALARM_IN) { if (alarmSinceMs == 0) alarmSinceMs = now; }
+  else if (L < ALARM_CLEAR_IN) alarmSinceMs = 0;
+  bool alarmHeld = (alarmSinceMs != 0) && (now - alarmSinceMs >= ALARM_DWELL_MS);
+
   int mode = 0;                                     // 0=off 1=warn 2=warn-fast 3=alarm
   if (!muted) {
-    if (L >= ALARM_IN && !acked)             mode = 3;
+    if (L >= ALARM_IN && !acked)             mode = alarmHeld ? 3 : 2;  // chirp fast until the dwell is satisfied
     else if (L >= WARN2_IN && L < ALARM_IN)  mode = 2;
     else if (L >= WARN_IN  && L < WARN2_IN)  mode = 1;
   }
@@ -988,31 +1014,36 @@ void startWebServer() {
 // Blocks for the duration of the download (a few seconds) — the local alarm is frozen
 // while it runs, so the caller MUST only invoke this when the water is low (see loop()).
 //
+// Returns TRUE when the check completed cleanly — including "already up to date", which
+// is a normal outcome, not a failure. Returns FALSE when the manifest could not be
+// fetched or parsed, or when a download was attempted and did not take; the caller uses
+// that to retry on OTA_RETRY_MS instead of waiting out the full interval.
+//
 // Manifest format (plain text, exactly two lines):
 //   <version integer>
 //   <https URL of the .bin>
-void checkForOTA() {
+bool checkForOTA() {
   // 1) Fetch the manifest.
   WiFiClientSecure mclient;
   mclient.setInsecure();               // encrypt-only, matching the InfluxDB path
   HTTPClient http;
   http.setTimeout(8000);
   http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);   // raw.githubusercontent may 30x
-  if (!http.begin(mclient, OTA_MANIFEST_URL)) { Serial.println("OTA: manifest begin failed"); return; }
+  if (!http.begin(mclient, OTA_MANIFEST_URL)) { Serial.println("OTA: manifest begin failed"); return false; }
   int code = http.GET();
-  if (code != HTTP_CODE_OK) { Serial.printf("OTA: manifest HTTP %d\n", code); http.end(); return; }
+  if (code != HTTP_CODE_OK) { Serial.printf("OTA: manifest HTTP %d\n", code); http.end(); return false; }
   String body = http.getString();
   http.end();
 
   // 2) Parse version (line 1) and bin URL (line 2).
   int nl = body.indexOf('\n');
-  if (nl < 0) { Serial.println("OTA: manifest malformed (need 2 lines)"); return; }
+  if (nl < 0) { Serial.println("OTA: manifest malformed (need 2 lines)"); return false; }
   int  version = body.substring(0, nl).toInt();
   String url   = body.substring(nl + 1);
   url.trim();                          // strip trailing CR / whitespace
 
   Serial.printf("OTA: running v%d, manifest v%d\n", FW_VERSION, version);
-  if (version <= FW_VERSION || url.length() == 0) { Serial.println("OTA: up to date"); return; }
+  if (version <= FW_VERSION || url.length() == 0) { Serial.println("OTA: up to date"); return true; }
 
   // 3) Newer version available -> download + flash.
   Serial.printf("OTA: updating -> %s\n", url.c_str());
@@ -1025,16 +1056,19 @@ void checkForOTA() {
   t_httpUpdate_return ret = httpUpdate.update(uclient, url);   // reboots here on success; below only runs on no-op/fail
   switch (ret) {
     case HTTP_UPDATE_NO_UPDATES:
+      // The manifest promised a newer build but the server disagreed — odd, but not a
+      // transport failure, so don't hammer it on the short retry.
       Serial.println("OTA: server reported no update");
-      break;
+      return true;
     case HTTP_UPDATE_FAILED:
       // Image is verified before the boot partition is switched, so a bad/truncated
       // download leaves the CURRENT firmware running — we just log and carry on.
+      // Worth a short retry: this is usually a dropped connection mid-download.
       Serial.printf("OTA: FAILED (%d) %s\n",
                     httpUpdate.getLastError(), httpUpdate.getLastErrorString().c_str());
-      break;
+      return false;
     default:
-      break;
+      return false;
   }
 }
 
@@ -1235,9 +1269,12 @@ void loop() {
     if (WiFi.status() == WL_CONNECTED &&
         lastLevelIn < WARN_IN &&
         ms - lastOtaCheckMs >= OTA_CHECK_INTERVAL_MS) {
-      lastOtaCheckMs = ms;
       logCommit();     // a successful update reboots without returning — don't lose staged readings
-      checkForOTA();
+      // Schedule the next attempt from the OUTCOME, not from the attempt. A clean check
+      // waits the full interval; a failed one comes back in OTA_RETRY_MS. Backdating
+      // lastOtaCheckMs is wrap-safe for the same reason the first-check line below is.
+      lastOtaCheckMs = checkForOTA() ? ms
+                                     : (ms - OTA_CHECK_INTERVAL_MS + OTA_RETRY_MS);
     }
 
     // ----- watchdog: "associated but not delivering", NOT "no network" -----

@@ -1,2 +1,2 @@
-8
-https://github.com/SsimonSA/church-drain-monitor/releases/download/fw-v8/StJoesDrainMonitor-v8.bin
+9
+https://github.com/SsimonSA/church-drain-monitor/releases/download/fw-v9/StJoesDrainMonitor-v9.bin
