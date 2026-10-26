@@ -3,6 +3,51 @@
 Running record of site visits and deployment state. Newest entry at the top.
 Add an entry for every visit and every release, even if the outcome is unknown.
 
+## 2026-10-26 — the 4.5" plateaus are a spurious echo, not water (remote analysis)
+
+- Since Sat 10-25 ~09:58 EDT the dashboard shows flat-topped "events" at 4.4–4.8 in
+  lasting 11 min to 2 h (10-25 10:18–10:44, 20:06–22:05; 10-26 01:46–02:34, 03:07–03:52,
+  08:46→ still going at 09:14). Pulled every reading since 10-22 via a Grafana viewer
+  token (12,975 rows) and looked at `raw_cm` next to `inches`.
+- **It is not water.** The raw distance flips straight from the dry resting value
+  (22.4 cm) to a fixed 15.6–16.0 cm in a single 3 s sample and straight back, including
+  one-sample reversions to 22.4 in the middle of a two-hour plateau. **Not one of the
+  7,895 samples in the 10-25/26 window has a raw between 17 and 21.5 cm** — the float is
+  never seen in transit. The real tests on 10-22 (192 samples) walk through that range
+  as they should. Water cannot rise 6.4 cm in 3 s, nor drop to empty for 3 s and come
+  back. Every sample is `k=21 ow=0 ne=0`, so the gate cannot see it: the junk echo sits
+  inside the 7–30 cm window.
+- Onset signature: single-sample flickers to 15.98/16.43/16.84 cm that get denser over
+  ~5 min until the junk wins the 21-ping median; same in reverse at the end. The raw
+  values are quantised (15.57, 15.98, 16.43, 16.84 — ~25 µs steps), i.e. a fixed
+  reflector, not a moving surface.
+- **Diagnosis:** the June multipath problem is back — a wall/liner echo at ~16 cm
+  beating the weak plastic-float echo. The liner and float were disturbed during the
+  10-22 remount (noted then as "still open: confirm it reads 25–26 cm empty after
+  remounting with the disturbed float/liner"; it now rests at 22.4, ~3 cm higher than
+  before, so something in the tube moved). The 10-22 bench handling produced the same
+  16 cm value. Why it comes and goes in hour-long blocks is not known — temperature or
+  humidity in the drain (dishwasher steam, overnight HVAC) are the usual suspects for
+  a multipath beat; the June episodes also clustered 2–6 AM.
+- **Consequences:** in the 24 h from 10-25 09:03 the box spent 117 min in the WARN
+  slow chirp and 229 min in the WARN2 fast chirp, 0 min at ALARM — silent and 0.00 the
+  other 76%. The junk sits at 4.4–4.8 in, so the latching buzzer has not fired, but the
+  raw has touched 15.12 cm (4.81 in); half a centimetre closer and it latches until
+  someone presses the button. Do not build the Grafana alert rule on this data yet — it
+  would page on every plateau.
+- **Next visit:** pull the probe, look at ~16 cm below the sensor face for a liner
+  edge/bulge/seam, droplet or anything bright; reseat the liner and float; confirm the
+  empty raw returns to ~25 cm. Consider finally fitting the 2" stainless fender washer
+  on the float top (the "intended deployable" from June that was never adopted) so the
+  float outvotes wall junk. Watch `raw_cm` for a few days after.
+- **Firmware idea, not done:** the limiter already caps the *level* at 1.5"/sample, but
+  nothing notices that the *raw* teleported 6 cm with no intermediate samples, or that
+  the 21 pings were bimodal. Recording the ping spread (e.g. count within ±1 cm of the
+  median) would make this visible in Grafana without changing alarm behaviour. Any
+  rejection rule must keep alarm latency at zero — see the DO-NOT-ADD-A-DWELL block.
+- Also noticed: the slew limiter publishes 1.50 and 2.93 in on the edges even though
+  those are below the 1.8 in deadband (deadband runs before the clamp). Cosmetic.
+
 ## 2026-10-22 — live overflow test on v10 proves the dwell would have been silent
 
 Both taps at full blast; the drain cannot keep up. Full 1 Hz trace, every sample
